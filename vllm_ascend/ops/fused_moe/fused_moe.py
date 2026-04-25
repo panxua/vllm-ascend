@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from functools import wraps
 from typing import Callable, Optional
 
+import os
+import numpy as np
 import torch
 import torch.nn.functional as F
 from vllm.config import get_current_vllm_config
@@ -52,6 +54,29 @@ from vllm_ascend.utils import (AscendDeviceType, enable_sp,
                                shared_experts_calculation_stream,
                                vllm_version_is, QuantType,
                                is_w8a8_dynamic)
+
+_SHARED_MOE_DUMP_DIR = os.environ.get("MOE_DUMP_DIR", "/tmp/moe_dump")
+_SHARED_MOE_DUMP_LAYER = int(os.environ.get("MOE_DUMP_LAYER_IDX", "0"))
+_shared_moe_dump_counter = {}
+
+
+def _shared_moe_dump(tensor, name):
+    global _shared_moe_dump_counter
+    key = name
+    _shared_moe_dump_counter[key] = _shared_moe_dump_counter.get(key, 0) + 1
+    step = _shared_moe_dump_counter[key]
+    d = os.path.join(_SHARED_MOE_DUMP_DIR, f"layer{_SHARED_MOE_DUMP_LAYER}", f"step{step}")
+    os.makedirs(d, exist_ok=True)
+    if isinstance(tensor, torch.Tensor):
+        try:
+            np.save(os.path.join(d, f"{name}.npy"), tensor.detach().cpu().float().numpy())
+        except Exception:
+            try:
+                np.save(os.path.join(d, f"{name}.npy"), tensor.detach().cpu().to(torch.float32).numpy())
+            except Exception:
+                np.save(os.path.join(d, f"{name}_raw.npy"), tensor.detach().cpu().numpy())
+        with open(os.path.join(d, f"{name}_meta.txt"), "w") as f:
+            f.write(f"name={name}\nshape={list(tensor.shape)}\ndtype={tensor.dtype}\n")
 
 
 @dataclass
@@ -597,6 +622,9 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
 
     def forward_impl(  # type: ignore[override]
             self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
+        _shared_moe_dump(hidden_states, "shared_fused_moe_input_hidden_states")
+        _shared_moe_dump(router_logits, "shared_fused_moe_router_logits")
+
         if self.multistream_overlap_gate:
             set_flash_common3_context(shared_experts=self._shared_experts)
 
@@ -608,6 +636,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             return_with_event=True,
         )
         routed_out = fused_moe_results.routed_out
+        _shared_moe_dump(routed_out, "shared_fused_moe_routed_out")
 
         if self._shared_experts is None:
             return routed_out
@@ -624,4 +653,5 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
                     before_combine=fused_moe_results.before_combine_evt,
                 ))
 
+        _shared_moe_dump(shared_out, "shared_fused_moe_shared_expert_out")
         return shared_out, routed_out

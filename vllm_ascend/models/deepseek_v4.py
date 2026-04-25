@@ -29,9 +29,30 @@ from collections.abc import Callable, Iterable
 from itertools import islice
 import torch.nn.functional as F
 import math
+import os
+import numpy as np
 
 import torch
 import torch_npu
+
+_DUMP_DIR = os.environ.get("MOE_DUMP_DIR", "/tmp/moe_dump")
+_MOE_DUMP_LAYER_IDX = int(os.environ.get("MOE_DUMP_LAYER_IDX", "0"))
+_moE_dump_counter = {}
+
+
+def _moe_dump_tensor(tensor, name, layer_idx):
+    if layer_idx != _MOE_DUMP_LAYER_IDX:
+        return
+    global _moE_dump_counter
+    key = (layer_idx, name)
+    _moE_dump_counter[key] = _moE_dump_counter.get(key, 0) + 1
+    step = _moE_dump_counter[key]
+    dump_dir = os.path.join(_DUMP_DIR, f"layer{layer_idx}", f"step{step}")
+    os.makedirs(dump_dir, exist_ok=True)
+    if isinstance(tensor, torch.Tensor):
+        np.save(os.path.join(dump_dir, f"{name}.npy"), tensor.detach().cpu().float().numpy())
+        with open(os.path.join(dump_dir, f"{name}_meta.txt"), "w") as f:
+            f.write(f"name={name}\nshape={list(tensor.shape)}\ndtype={tensor.dtype}\n")
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm_ascend.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
@@ -340,31 +361,32 @@ class DeepseekV4MoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        # Chunk the hidden states so they aren't replicated across TP ranks.
-        # This avoids duplicate computation in self.experts.
-        # TODO: We can replace the all_reduce at the end of attn with a
-        # reduce_scatter instead of chunking here.
+        _moe_dump_tensor(hidden_states, "moe_input_hidden_states", self.layer_idx)
+
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
         if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the FusedMoE class
             fused_moe_out = self.experts(
                 hidden_states=hidden_states, router_logits=hidden_states
             )
         else:
-            # router_logits: (num_tokens, n_experts)
             router_logits = F.linear(hidden_states.float(), self.gate.weight)
+            _moe_dump_tensor(router_logits, "gate_router_logits", self.layer_idx)
+            _moe_dump_tensor(self.gate.weight, "gate_weight", self.layer_idx)
+            if self.gate.e_score_correction_bias is not None:
+                _moe_dump_tensor(self.gate.e_score_correction_bias, "gate_e_score_correction_bias", self.layer_idx)
             fused_moe_out = self.experts(
                 hidden_states=hidden_states, router_logits=router_logits
             )
 
         shared_output, final_hidden_states = fused_moe_out
+        _moe_dump_tensor(final_hidden_states, "routed_experts_output", self.layer_idx)
+        if shared_output is not None:
+            _moe_dump_tensor(shared_output, "shared_experts_output", self.layer_idx)
         if self.shared_experts is None:
             assert shared_output is None
 
-        # Fix FP16 overflow
-        # See DeepseekV2DecoderLayer for more details.
         if hidden_states.dtype != torch.float16:
             if not self.is_rocm_aiter_moe_enabled:
                 if self.shared_experts is not None:
@@ -375,6 +397,8 @@ class DeepseekV4MoE(nn.Module):
         elif self.shared_experts is not None:
             assert shared_output is not None
             final_hidden_states = muls_add_triton(shared_output, final_hidden_states, 1.0 / self.routed_scaling_factor)
+
+        _moe_dump_tensor(final_hidden_states, "moe_final_output_before_allreduce", self.layer_idx)
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(

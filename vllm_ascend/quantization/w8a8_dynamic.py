@@ -17,8 +17,31 @@
 
 from typing import Any, Callable, Dict, Optional
 
+import os
+import numpy as np
 import torch
 import torch_npu
+
+_w8a8_dump_counter = {}
+
+
+def _w8a8_dump_tensor(tensor, name, layer_idx, dump_dir="/tmp/moe_dump"):
+    global _w8a8_dump_counter
+    key = (layer_idx, name)
+    _w8a8_dump_counter[key] = _w8a8_dump_counter.get(key, 0) + 1
+    step = _w8a8_dump_counter[key]
+    d = os.path.join(dump_dir, f"layer{layer_idx}", f"step{step}")
+    os.makedirs(d, exist_ok=True)
+    if isinstance(tensor, torch.Tensor):
+        try:
+            np.save(os.path.join(d, f"{name}.npy"), tensor.detach().cpu().float().numpy())
+        except Exception:
+            try:
+                np.save(os.path.join(d, f"{name}.npy"), tensor.detach().cpu().to(torch.float32).numpy())
+            except Exception:
+                np.save(os.path.join(d, f"{name}_raw.npy"), tensor.detach().cpu().numpy())
+        with open(os.path.join(d, f"{name}_meta.txt"), "w") as f:
+            f.write(f"name={name}\nshape={list(tensor.shape)}\ndtype={tensor.dtype}\n")
 from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
@@ -228,6 +251,13 @@ class AscendW8A8DynamicFusedMoEMethod:
                 tid2eid=self.tid2eid)
         assert topk_ids is not None
         assert topk_weights is not None
+
+        _w8a8_dump_dir = os.environ.get("MOE_DUMP_DIR", "/tmp/moe_dump")
+        _w8a8_layer_idx = int(os.environ.get("MOE_DUMP_LAYER_IDX", "0"))
+
+        _w8a8_dump_tensor(x, "w8a8_input_hidden_states", _w8a8_layer_idx, _w8a8_dump_dir)
+        _w8a8_dump_tensor(router_logits, "w8a8_router_logits_input", _w8a8_layer_idx, _w8a8_dump_dir)
+
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
                 expert_indices=topk_ids,
@@ -236,9 +266,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 zero_expert_type=zero_expert_type,
                 hidden_states=x,
             )
-        # this is a naive implementation for experts load balance so as
-        # to avoid accumulating too much tokens on a single rank.
-        # currently it is only activated when doing profile runs.
+
         if enable_force_load_balance:
             random_matrix = torch.rand(topk_ids.size(0),
                                        global_num_experts -
@@ -249,6 +277,9 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         assert topk_weights is not None
         topk_weights = topk_weights.to(self.in_dtype)
+
+        _w8a8_dump_tensor(topk_weights, "w8a8_topk_weights", _w8a8_layer_idx, _w8a8_dump_dir)
+        _w8a8_dump_tensor(topk_ids, "w8a8_topk_ids", _w8a8_layer_idx, _w8a8_dump_dir)
 
         moe_comm_method = get_forward_context().moe_comm_method
         # When VLLM_ASCEND_ENABLE_FUSED_MC2 == 2, use dispatch_gmm_combine_decode, need fp32 scale
@@ -287,6 +318,14 @@ class AscendW8A8DynamicFusedMoEMethod:
             log2phy=log2phy,
             dynamic_eplb=self.dynamic_eplb,
             mc2_mask=kwargs.get("mc2_mask", None))
+
+        _w8a8_dump_tensor(final_hidden_states, "w8a8_fused_experts_output", _w8a8_layer_idx, _w8a8_dump_dir)
+        if not self.dynamic_eplb:
+            _w8a8_dump_tensor(layer.w13_weight, "w8a8_w13_weight", _w8a8_layer_idx, _w8a8_dump_dir)
+            _w8a8_dump_tensor(layer.w2_weight, "w8a8_w2_weight", _w8a8_layer_idx, _w8a8_dump_dir)
+            _w8a8_dump_tensor(layer.w13_weight_scale, "w8a8_w13_weight_scale", _w8a8_layer_idx, _w8a8_dump_dir)
+            _w8a8_dump_tensor(layer.w2_weight_scale, "w8a8_w2_weight_scale", _w8a8_layer_idx, _w8a8_dump_dir)
+
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result
         return final_hidden_states
