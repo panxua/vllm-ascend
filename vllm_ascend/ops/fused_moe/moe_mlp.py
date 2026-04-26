@@ -28,7 +28,7 @@ from vllm_ascend.utils import (AscendDeviceType, dispose_tensor,
                                enable_custom_op, get_ascend_device_type,
                                get_weight_prefetch_method)
 
-from vllm_ascend.models.deepseek_v4 import _moe_dump_step, _moe_dump_layer, _DUMP_DIR, _DUMP_STEPS, _DUMP_LAYERS
+from vllm_ascend.models.deepseek_v4 import _moe_dump_step, _moe_dump_layer, _moe_dump_rank, _DUMP_DIR, _DUMP_STEPS, _DUMP_LAYERS
 
 
 def _mlp_dump(tensor, name):
@@ -36,7 +36,8 @@ def _mlp_dump(tensor, name):
     layer_idx = _moe_dump_layer()
     if step not in _DUMP_STEPS or layer_idx not in _DUMP_LAYERS:
         return
-    d = os.path.join(_DUMP_DIR, f"step{step}", f"layer{layer_idx}")
+    rank = _moe_dump_rank()
+    d = os.path.join(_DUMP_DIR, f"step{step}", f"rank{rank}", f"layer{layer_idx}")
     os.makedirs(d, exist_ok=True)
     if isinstance(tensor, torch.Tensor):
         torch.save(tensor.cpu(), os.path.join(d, f"{name}.pt"))

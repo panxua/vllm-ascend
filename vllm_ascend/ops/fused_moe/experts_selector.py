@@ -25,7 +25,7 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.utils import split_tensor_along_first_dim
 
-from vllm_ascend.models.deepseek_v4 import _moe_dump_step, _moe_dump_layer, _DUMP_DIR, _DUMP_STEPS, _DUMP_LAYERS
+from vllm_ascend.models.deepseek_v4 import _moe_dump_step, _moe_dump_layer, _moe_dump_rank, _DUMP_DIR, _DUMP_STEPS, _DUMP_LAYERS
 
 
 def _selector_dump(tensor, name):
@@ -33,7 +33,8 @@ def _selector_dump(tensor, name):
     layer_idx = _moe_dump_layer()
     if step not in _DUMP_STEPS or layer_idx not in _DUMP_LAYERS:
         return
-    d = os.path.join(_DUMP_DIR, f"step{step}", f"layer{layer_idx}")
+    rank = _moe_dump_rank()
+    d = os.path.join(_DUMP_DIR, f"step{step}", f"rank{rank}", f"layer{layer_idx}")
     os.makedirs(d, exist_ok=True)
     if isinstance(tensor, torch.Tensor):
         torch.save(tensor.cpu(), os.path.join(d, f"{name}.pt"))
@@ -125,6 +126,17 @@ def select_experts(hidden_states: torch.Tensor,
             input_ids = None,
         )
     if mix_placement:
+        _rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        _should_print = _rank == 0 and _moe_dump_step() in _DUMP_STEPS
+        if _should_print:
+            print("=" * 80)
+            print("[mix_placement] BEFORE:")
+            print(f"  topk_ids: dtype={topk_ids.dtype}, shape={list(topk_ids.shape)}")
+            print(f"  {topk_ids}")
+            print(f"  topk_weights: dtype={topk_weights.dtype}, shape={list(topk_weights.shape)}")
+            print(f"  {topk_weights}")
+            print(f"  num_logical_experts={num_logical_experts}, num_shared_experts={num_shared_experts}")
+            print(f"  shared_expert_routing_factor={shared_expert_routing_factor}")
         if scoring_func == "sqrtsoftplus":
             shared_expert_routing_factor = 1.0 / 1.5 # hardcode for new model
         else:
@@ -145,6 +157,13 @@ def select_experts(hidden_states: torch.Tensor,
         topk_ids = torch.cat([topk_ids, pad_shared_expert_ids], dim=1)
         topk_weights = torch.cat([topk_weights, pad_shared_expert_weights],
                                  dim=1)
+        if _should_print:
+            print("[mix_placement] AFTER:")
+            print(f"  topk_ids: dtype={topk_ids.dtype}, shape={list(topk_ids.shape)}")
+            print(f"  {topk_ids}")
+            print(f"  topk_weights: dtype={topk_weights.dtype}, shape={list(topk_weights.shape)}")
+            print(f"  {topk_weights}")
+            print("=" * 80)
     return topk_weights, topk_ids
 
 
@@ -293,7 +312,8 @@ def _select_experts_with_fusion_ops(
         _selector_dump(router_logits, "gate_router_logits_before_hash_gating")
 
         _rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        if _rank == 0:
+        _should_print = _rank == 0 and _moe_dump_step() in _DUMP_STEPS
+        if _should_print:
             print("=" * 80)
             print("[moe_gating_top_k_hash] INPUTS:")
             print(f"  x (router_logits): dtype={router_logits.dtype}, norm={router_logits.float().norm():.6f}, device={router_logits.device}")
@@ -333,7 +353,7 @@ def _select_experts_with_fusion_ops(
             out_flag=False
         )
 
-        if _rank == 0:
+        if _should_print:
             print("[moe_gating_top_k_hash] OUTPUTS:")
             print(f"  topk_weights: dtype={topk_weights.dtype}, norm={topk_weights.float().norm():.6f}, device={topk_weights.device}")
             print(f"  {topk_weights}")

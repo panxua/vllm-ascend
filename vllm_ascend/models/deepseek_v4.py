@@ -37,8 +37,14 @@ import torch_npu
 _DUMP_DIR = os.environ.get("MOE_DUMP_DIR", "/tmp/moe_dump")
 _DUMP_STEPS = set(int(x) for x in os.environ.get("MOE_DUMP_STEPS", "0").split(",") if x.strip())
 _DUMP_LAYERS = set(int(x) for x in os.environ.get("MOE_DUMP_LAYERS", "0").split(",") if x.strip())
-_global_step_counter = 0
+_global_step_counter = -1
 _current_dump_layer = -1
+
+
+def _moe_dump_rank():
+    if torch.distributed.is_initialized():
+        return torch.distributed.get_rank()
+    return 0
 
 
 def _moe_dump_step():
@@ -63,7 +69,8 @@ def _moe_dump_tensor(tensor, name, layer_idx):
     step = _global_step_counter
     if step not in _DUMP_STEPS or layer_idx not in _DUMP_LAYERS:
         return
-    dump_dir = os.path.join(_DUMP_DIR, f"step{step}", f"layer{layer_idx}")
+    rank = _moe_dump_rank()
+    dump_dir = os.path.join(_DUMP_DIR, f"step{step}", f"rank{rank}", f"layer{layer_idx}")
     os.makedirs(dump_dir, exist_ok=True)
     if isinstance(tensor, torch.Tensor):
         torch.save(tensor.cpu(), os.path.join(dump_dir, f"{name}.pt"))
