@@ -28,19 +28,7 @@ from vllm_ascend.utils import (AscendDeviceType, dispose_tensor,
                                enable_custom_op, get_ascend_device_type,
                                get_weight_prefetch_method)
 
-from vllm_ascend.models.deepseek_v4 import _moe_dump_step, _moe_dump_layer, _moe_dump_rank, _DUMP_DIR, _DUMP_STEPS, _DUMP_LAYERS
-
-
-def _mlp_dump(tensor, name):
-    step = _moe_dump_step()
-    layer_idx = _moe_dump_layer()
-    if step not in _DUMP_STEPS or layer_idx not in _DUMP_LAYERS:
-        return
-    rank = _moe_dump_rank()
-    d = os.path.join(_DUMP_DIR, f"step{step}", f"rank{rank}", f"layer{layer_idx}")
-    os.makedirs(d, exist_ok=True)
-    if isinstance(tensor, torch.Tensor):
-        torch.save(tensor.cpu(), os.path.join(d, f"{name}.pt"))
+from vllm_ascend.models.deepseek_v4 import _moe_dump_sub
 
 
 def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb):
@@ -116,8 +104,8 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
     bias1, bias2 = None, None
     _output_dtype = w2_scale[0].dtype
 
-    _mlp_dump(hidden_states, "quant_mlp_input")
-    _mlp_dump(group_list, "quant_mlp_group_list")
+    _moe_dump_sub(hidden_states, "input", "ffn/group_gemm1")
+    _moe_dump_sub(group_list, "group_list", "ffn/group_gemm1")
 
     weight_prefetch_method = get_weight_prefetch_method()
     if weight_prefetch_method:
@@ -173,8 +161,8 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 activate_left=True,
                 quant_mode=1,
             )
-        _mlp_dump(hidden_states, "gmm1_swiglu_output")
-        _mlp_dump(swiglu_out_scale, "gmm1_swiglu_out_scale")
+        _moe_dump_sub(hidden_states, "output", "ffn/dequant_swiglu_quant")
+        _moe_dump_sub(swiglu_out_scale, "swiglu_out_scale", "ffn/dequant_swiglu_quant")
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
@@ -186,7 +174,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             group_type=0,
             group_list=group_list,
             output_dtype=w2_scale[0].dtype)[0]
-        _mlp_dump(hidden_states, "gmm2_down_proj_output")
+        _moe_dump_sub(hidden_states, "output", "ffn/group_gemm2")
     elif w1_offset is not None:
         # gmm1: gate_up_proj
         hidden_states = torch_npu.npu_grouped_matmul(
@@ -200,10 +188,10 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             group_list=group_list,
             output_dtype=_output_dtype)[0]
         dispose_tensor(unquantized_hidden_states)
-        _mlp_dump(hidden_states, "antiquant_gmm1_gate_up_output")
+        _moe_dump_sub(hidden_states, "gate_up_output", "ffn/group_gemm1")
         # act_fn: swiglu
         hidden_states = torch_npu.npu_swiglu(hidden_states)
-        _mlp_dump(hidden_states, "antiquant_swiglu_output")
+        _moe_dump_sub(hidden_states, "swiglu_output", "ffn/activation")
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
@@ -215,7 +203,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             group_type=0,
             group_list=group_list,
             output_dtype=_output_dtype)[0]
-        _mlp_dump(hidden_states, "antiquant_gmm2_down_proj_output")
+        _moe_dump_sub(hidden_states, "down_proj_output", "ffn/group_gemm2")
     else:
         if w1_scale_bias is not None:
             if group_list_type == 0:
@@ -280,7 +268,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 hidden_states = torch_npu.npu_swiglu(hidden_states)
                 hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(
                     hidden_states)
-        _mlp_dump(hidden_states, "else_branch_gmm1_swiglu_output")
+        _moe_dump_sub(hidden_states, "gmm1_swiglu_output", "ffn/dequant_swiglu_quant")
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
@@ -293,7 +281,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             group_type=0,
             group_list=group_list,
             output_dtype=_output_dtype)[0]
-        _mlp_dump(hidden_states, "else_branch_gmm2_down_proj_output")
+        _moe_dump_sub(hidden_states, "gmm2_down_proj_output", "ffn/group_gemm2")
     return hidden_states
 
 

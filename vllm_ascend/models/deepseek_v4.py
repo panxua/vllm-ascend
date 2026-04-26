@@ -65,12 +65,34 @@ def _moe_dump_advance_step():
     _global_step_counter += 1
 
 
-def _moe_dump_tensor(tensor, name, layer_idx):
-    step = _global_step_counter
-    if step not in _DUMP_STEPS or layer_idx not in _DUMP_LAYERS:
-        return
+def _moe_dump_should_dump(layer_idx):
+    return _global_step_counter in _DUMP_STEPS and layer_idx in _DUMP_LAYERS
+
+
+def _moe_dump_base_dir(layer_idx=None):
+    if layer_idx is None:
+        layer_idx = _current_dump_layer
     rank = _moe_dump_rank()
-    dump_dir = os.path.join(_DUMP_DIR, f"step{step}", f"rank{rank}", f"layer{layer_idx}")
+    return os.path.join(
+        _DUMP_DIR, f"step{_global_step_counter}", f"rank{rank}", f"layer{layer_idx}"
+    )
+
+
+def _moe_dump_tensor(tensor, name, layer_idx):
+    if not _moe_dump_should_dump(layer_idx):
+        return
+    dump_dir = _moe_dump_base_dir(layer_idx)
+    os.makedirs(dump_dir, exist_ok=True)
+    if isinstance(tensor, torch.Tensor):
+        torch.save(tensor.cpu(), os.path.join(dump_dir, f"{name}.pt"))
+
+
+def _moe_dump_sub(tensor, name, sub_path, layer_idx=None):
+    if layer_idx is None:
+        layer_idx = _current_dump_layer
+    if not _moe_dump_should_dump(layer_idx):
+        return
+    dump_dir = os.path.join(_moe_dump_base_dir(layer_idx), sub_path)
     os.makedirs(dump_dir, exist_ok=True)
     if isinstance(tensor, torch.Tensor):
         torch.save(tensor.cpu(), os.path.join(dump_dir, f"{name}.pt"))
@@ -393,19 +415,20 @@ class DeepseekV4MoE(nn.Module):
                 hidden_states=hidden_states, router_logits=hidden_states
             )
         else:
+            # gate/matmul
             router_logits = F.linear(hidden_states.float(), self.gate.weight)
-            _moe_dump_tensor(router_logits, "gate_router_logits", self.layer_idx)
-            _moe_dump_tensor(self.gate.weight, "gate_weight", self.layer_idx)
+            _moe_dump_sub(router_logits, "router_logits", "gate/matmul")
+            _moe_dump_sub(self.gate.weight, "gate_weight", "gate/matmul")
             if self.gate.e_score_correction_bias is not None:
-                _moe_dump_tensor(self.gate.e_score_correction_bias, "gate_e_score_correction_bias", self.layer_idx)
+                _moe_dump_sub(self.gate.e_score_correction_bias, "e_score_correction_bias", "gate/matmul")
             fused_moe_out = self.experts(
                 hidden_states=hidden_states, router_logits=router_logits
             )
 
         shared_output, final_hidden_states = fused_moe_out
-        _moe_dump_tensor(final_hidden_states, "routed_experts_output", self.layer_idx)
+        _moe_dump_sub(final_hidden_states, "routed_experts_output", "gate/final_outputs")
         if shared_output is not None:
-            _moe_dump_tensor(shared_output, "shared_experts_output", self.layer_idx)
+            _moe_dump_sub(shared_output, "shared_experts_output", "gate/final_outputs")
         if self.shared_experts is None:
             assert shared_output is None
 
@@ -420,6 +443,7 @@ class DeepseekV4MoE(nn.Module):
             assert shared_output is not None
             final_hidden_states = muls_add_triton(shared_output, final_hidden_states, 1.0 / self.routed_scaling_factor)
 
+        _moe_dump_sub(final_hidden_states, "renormalized_output", "gate/renormalize_topk_weights")
         _moe_dump_tensor(final_hidden_states, "moe_final_output_before_allreduce", self.layer_idx)
 
         if self.is_sequence_parallel:

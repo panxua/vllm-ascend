@@ -18,7 +18,6 @@ from dataclasses import dataclass, field
 from functools import wraps
 from typing import Callable, Optional
 
-import os
 import torch
 import torch.nn.functional as F
 from vllm.config import get_current_vllm_config
@@ -54,19 +53,7 @@ from vllm_ascend.utils import (AscendDeviceType, enable_sp,
                                vllm_version_is, QuantType,
                                is_w8a8_dynamic)
 
-from vllm_ascend.models.deepseek_v4 import _moe_dump_step, _moe_dump_layer, _moe_dump_rank, _DUMP_DIR, _DUMP_STEPS, _DUMP_LAYERS
-
-
-def _shared_moe_dump(tensor, name):
-    step = _moe_dump_step()
-    layer_idx = _moe_dump_layer()
-    if step not in _DUMP_STEPS or layer_idx not in _DUMP_LAYERS:
-        return
-    rank = _moe_dump_rank()
-    d = os.path.join(_DUMP_DIR, f"step{step}", f"rank{rank}", f"layer{layer_idx}")
-    os.makedirs(d, exist_ok=True)
-    if isinstance(tensor, torch.Tensor):
-        torch.save(tensor.cpu(), os.path.join(d, f"{name}.pt"))
+from vllm_ascend.models.deepseek_v4 import _moe_dump_sub
 
 
 @dataclass
@@ -129,6 +116,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
         input_ids = get_forward_context().input_ids
+        _moe_dump_sub(x, "hidden_states", "ffn/select_experts")
+        _moe_dump_sub(router_logits, "router_logits", "ffn/select_experts")
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -145,6 +134,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             tid2eid=self.tid2eid,
             input_ids=input_ids
             )
+        _moe_dump_sub(topk_weights, "topk_weights", "ffn/moe_active_topk")
+        _moe_dump_sub(topk_ids, "topk_ids", "ffn/moe_active_topk")
 
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
@@ -156,9 +147,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             )
 
         topk_weights = topk_weights.to(x.dtype)
-        # this is a naive implementation for experts load balance so as
-        # to avoid accumulating too much tokens on a single rank.
-        # currently it is only activated when doing profile runs.
+        _moe_dump_sub(topk_weights, "topk_weights_cast", "ffn/forward_expert")
+        _moe_dump_sub(topk_ids, "topk_ids", "ffn/forward_expert")
+
         if enable_force_load_balance:
             random_matrix = torch.rand(topk_ids.size(0),
                                        global_num_experts,
@@ -167,6 +158,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 random_matrix, dim=1)[:, :topk_ids.size(1)].to(topk_ids.dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
+        _moe_dump_sub(x, "hidden_states", "ffn/forward_expert")
+        _moe_dump_sub(layer.w13_weight, "w13_weight", "ffn/gate_proj")
+        _moe_dump_sub(layer.w2_weight, "w2_weight", "ffn/gate_proj")
         final_hidden_states = moe_comm_method.fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
@@ -177,6 +171,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             apply_router_weight_on_input=apply_router_weight_on_input,
             dynamic_eplb=self.dynamic_eplb,
             mc2_mask=kwargs.get("mc2_mask", None))
+        _moe_dump_sub(final_hidden_states, "final_hidden_states", "ffn/moe_combine_result")
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result
         return final_hidden_states
@@ -381,6 +376,8 @@ class AscendFusedMoE(FusedMoE):
             replace_allreduce=forward_context.sp_enabled,
             enable_shared_expert_dp=self.enable_shared_expert_dp,
             quant_type=self.quant_type)
+        _moe_dump_sub(hidden_states, "hidden_states_after_prepare", "ffn/dp_gather")
+        _moe_dump_sub(router_logits, "router_logits_after_prepare", "ffn/dp_gather")
 
         # Make sure the default stream waits for the gate stream to finish.
         if self.multistream_overlap_gate:
@@ -428,6 +425,7 @@ class AscendFusedMoE(FusedMoE):
             hidden_states=fused_experts_results.routed_out,
             reduce_results=self.reduce_results,
             context_metadata=context_metadata)
+        _moe_dump_sub(routed_out, "routed_out_after_finalize", "ffn/tp_reduce")
 
         if return_with_event:
             return FusedMoEResult(
@@ -590,10 +588,12 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             # dispatch communication.
             maybe_wait_event(fused_moe_evts.before_dispatch)
             part1_out = self._shared_experts_part1(hidden_states)
+            _moe_dump_sub(part1_out, "gate_up_output", "ffn/shared_experts")
             # Execute the down projection concurrently with the combine
             # communication.
             maybe_wait_event(fused_moe_evts.before_combine)
             shared_out = self._shared_experts_part2(hidden_states, part1_out)
+            _moe_dump_sub(shared_out, "shared_out_before_allreduce", "ffn/shared_expert_gate")
 
         # Make sure the default stream waits for the shared experts stream to
         # finish.
@@ -612,8 +612,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
 
     def forward_impl(  # type: ignore[override]
             self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
-        _shared_moe_dump(hidden_states, "shared_fused_moe_input_hidden_states")
-        _shared_moe_dump(router_logits, "shared_fused_moe_router_logits")
+        _moe_dump_sub(hidden_states, "hidden_states", "ffn/forward")
+        _moe_dump_sub(router_logits, "router_logits", "ffn/forward")
 
         if self.multistream_overlap_gate:
             set_flash_common3_context(shared_experts=self._shared_experts)
@@ -626,7 +626,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             return_with_event=True,
         )
         routed_out = fused_moe_results.routed_out
-        _shared_moe_dump(routed_out, "shared_fused_moe_routed_out")
+        _moe_dump_sub(routed_out, "routed_out", "ffn/forward")
 
         if self._shared_experts is None:
             return routed_out
@@ -643,5 +643,5 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
                     before_combine=fused_moe_results.before_combine_evt,
                 ))
 
-        _shared_moe_dump(shared_out, "shared_fused_moe_shared_expert_out")
+        _moe_dump_sub(shared_out, "shared_expert_out", "ffn/shared_experts")
         return shared_out, routed_out
