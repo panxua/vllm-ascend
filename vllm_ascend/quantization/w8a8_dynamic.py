@@ -21,15 +21,15 @@ import os
 import torch
 import torch_npu
 
-_W8A8_DUMP_DIR = os.environ.get("MOE_DUMP_DIR", "/tmp/moe_dump")
-_W8A8_DUMP_STEP = 0
-_W8A8_DUMP_LAYER = 0
+from vllm_ascend.models.deepseek_v4 import _moe_dump_step, _moe_dump_layer, _DUMP_DIR, _DUMP_STEPS, _DUMP_LAYERS
 
 
-def _w8a8_dump_tensor(tensor, name, layer_idx, dump_dir=None):
-    if layer_idx != _W8A8_DUMP_LAYER:
+def _w8a8_dump_tensor(tensor, name):
+    step = _moe_dump_step()
+    layer_idx = _moe_dump_layer()
+    if step not in _DUMP_STEPS or layer_idx not in _DUMP_LAYERS:
         return
-    d = os.path.join(dump_dir or _W8A8_DUMP_DIR, f"step{_W8A8_DUMP_STEP}", f"layer{layer_idx}")
+    d = os.path.join(_DUMP_DIR, f"step{step}", f"layer{layer_idx}")
     os.makedirs(d, exist_ok=True)
     if isinstance(tensor, torch.Tensor):
         torch.save(tensor.cpu(), os.path.join(d, f"{name}.pt"))
@@ -243,8 +243,8 @@ class AscendW8A8DynamicFusedMoEMethod:
         assert topk_ids is not None
         assert topk_weights is not None
 
-        _w8a8_dump_tensor(x, "w8a8_input_hidden_states", _W8A8_DUMP_LAYER)
-        _w8a8_dump_tensor(router_logits, "w8a8_router_logits_input", _W8A8_DUMP_LAYER)
+        _w8a8_dump_tensor(x, "w8a8_input_hidden_states")
+        _w8a8_dump_tensor(router_logits, "w8a8_router_logits_input")
 
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
@@ -266,8 +266,8 @@ class AscendW8A8DynamicFusedMoEMethod:
         assert topk_weights is not None
         topk_weights = topk_weights.to(self.in_dtype)
 
-        _w8a8_dump_tensor(topk_weights, "w8a8_topk_weights", _W8A8_DUMP_LAYER)
-        _w8a8_dump_tensor(topk_ids, "w8a8_topk_ids", _W8A8_DUMP_LAYER)
+        _w8a8_dump_tensor(topk_weights, "w8a8_topk_weights")
+        _w8a8_dump_tensor(topk_ids, "w8a8_topk_ids")
 
         moe_comm_method = get_forward_context().moe_comm_method
         # When VLLM_ASCEND_ENABLE_FUSED_MC2 == 2, use dispatch_gmm_combine_decode, need fp32 scale
@@ -307,12 +307,12 @@ class AscendW8A8DynamicFusedMoEMethod:
             dynamic_eplb=self.dynamic_eplb,
             mc2_mask=kwargs.get("mc2_mask", None))
 
-        _w8a8_dump_tensor(final_hidden_states, "w8a8_fused_experts_output", _W8A8_DUMP_LAYER)
+        _w8a8_dump_tensor(final_hidden_states, "w8a8_fused_experts_output")
         if not self.dynamic_eplb:
-            _w8a8_dump_tensor(layer.w13_weight, "w8a8_w13_weight", _W8A8_DUMP_LAYER)
-            _w8a8_dump_tensor(layer.w2_weight, "w8a8_w2_weight", _W8A8_DUMP_LAYER)
-            _w8a8_dump_tensor(layer.w13_weight_scale, "w8a8_w13_weight_scale", _W8A8_DUMP_LAYER)
-            _w8a8_dump_tensor(layer.w2_weight_scale, "w8a8_w2_weight_scale", _W8A8_DUMP_LAYER)
+            _w8a8_dump_tensor(layer.w13_weight, "w8a8_w13_weight")
+            _w8a8_dump_tensor(layer.w2_weight, "w8a8_w2_weight")
+            _w8a8_dump_tensor(layer.w13_weight_scale, "w8a8_w13_weight_scale")
+            _w8a8_dump_tensor(layer.w2_weight_scale, "w8a8_w2_weight_scale")
 
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result

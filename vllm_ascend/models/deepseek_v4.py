@@ -35,14 +35,35 @@ import torch
 import torch_npu
 
 _DUMP_DIR = os.environ.get("MOE_DUMP_DIR", "/tmp/moe_dump")
-_DUMP_STEP = 0
-_DUMP_LAYER = 0
+_DUMP_STEPS = set(int(x) for x in os.environ.get("MOE_DUMP_STEPS", "0").split(",") if x.strip())
+_DUMP_LAYERS = set(int(x) for x in os.environ.get("MOE_DUMP_LAYERS", "0").split(",") if x.strip())
+_global_step_counter = 0
+_current_dump_layer = -1
+
+
+def _moe_dump_step():
+    return _global_step_counter
+
+
+def _moe_dump_layer():
+    return _current_dump_layer
+
+
+def _moe_dump_set_layer(layer_idx):
+    global _current_dump_layer
+    _current_dump_layer = layer_idx
+
+
+def _moe_dump_advance_step():
+    global _global_step_counter
+    _global_step_counter += 1
 
 
 def _moe_dump_tensor(tensor, name, layer_idx):
-    if layer_idx != _DUMP_LAYER:
+    step = _global_step_counter
+    if step not in _DUMP_STEPS or layer_idx not in _DUMP_LAYERS:
         return
-    dump_dir = os.path.join(_DUMP_DIR, f"step{_DUMP_STEP}", f"layer{layer_idx}")
+    dump_dir = os.path.join(_DUMP_DIR, f"step{step}", f"layer{layer_idx}")
     os.makedirs(dump_dir, exist_ok=True)
     if isinstance(tensor, torch.Tensor):
         torch.save(tensor.cpu(), os.path.join(dump_dir, f"{name}.pt"))
@@ -354,6 +375,7 @@ class DeepseekV4MoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
+        _moe_dump_set_layer(self.layer_idx)
         _moe_dump_tensor(hidden_states, "moe_input_hidden_states", self.layer_idx)
 
         if self.is_sequence_parallel:
@@ -905,6 +927,7 @@ class DeepseekV4Model(nn.Module):
             hidden_states, residual = layer(
                 positions, hidden_states, residual, llama_4_scaling
             )
+        _moe_dump_advance_step()
         hidden_states = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
