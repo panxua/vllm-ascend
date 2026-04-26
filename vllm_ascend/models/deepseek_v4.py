@@ -30,29 +30,22 @@ from itertools import islice
 import torch.nn.functional as F
 import math
 import os
-import numpy as np
 
 import torch
 import torch_npu
 
 _DUMP_DIR = os.environ.get("MOE_DUMP_DIR", "/tmp/moe_dump")
-_MOE_DUMP_LAYER_IDX = int(os.environ.get("MOE_DUMP_LAYER_IDX", "0"))
-_moE_dump_counter = {}
+_DUMP_STEP = 0
+_DUMP_LAYER = 0
 
 
 def _moe_dump_tensor(tensor, name, layer_idx):
-    if layer_idx != _MOE_DUMP_LAYER_IDX:
+    if layer_idx != _DUMP_LAYER:
         return
-    global _moE_dump_counter
-    key = (layer_idx, name)
-    _moE_dump_counter[key] = _moE_dump_counter.get(key, 0) + 1
-    step = _moE_dump_counter[key]
-    dump_dir = os.path.join(_DUMP_DIR, f"layer{layer_idx}", f"step{step}")
+    dump_dir = os.path.join(_DUMP_DIR, f"step{_DUMP_STEP}", f"layer{layer_idx}")
     os.makedirs(dump_dir, exist_ok=True)
     if isinstance(tensor, torch.Tensor):
-        np.save(os.path.join(dump_dir, f"{name}.npy"), tensor.detach().cpu().float().numpy())
-        with open(os.path.join(dump_dir, f"{name}_meta.txt"), "w") as f:
-            f.write(f"name={name}\nshape={list(tensor.shape)}\ndtype={tensor.dtype}\n")
+        torch.save(tensor.cpu(), os.path.join(dump_dir, f"{name}.pt"))
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm_ascend.transformers_utils.configs.deepseek_v4 import DeepseekV4Config

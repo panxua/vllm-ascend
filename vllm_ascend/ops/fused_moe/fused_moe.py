@@ -19,7 +19,6 @@ from functools import wraps
 from typing import Callable, Optional
 
 import os
-import numpy as np
 import torch
 import torch.nn.functional as F
 from vllm.config import get_current_vllm_config
@@ -56,27 +55,15 @@ from vllm_ascend.utils import (AscendDeviceType, enable_sp,
                                is_w8a8_dynamic)
 
 _SHARED_MOE_DUMP_DIR = os.environ.get("MOE_DUMP_DIR", "/tmp/moe_dump")
-_SHARED_MOE_DUMP_LAYER = int(os.environ.get("MOE_DUMP_LAYER_IDX", "0"))
-_shared_moe_dump_counter = {}
+_SHARED_MOE_DUMP_STEP = 0
+_SHARED_MOE_DUMP_LAYER = 0
 
 
 def _shared_moe_dump(tensor, name):
-    global _shared_moe_dump_counter
-    key = name
-    _shared_moe_dump_counter[key] = _shared_moe_dump_counter.get(key, 0) + 1
-    step = _shared_moe_dump_counter[key]
-    d = os.path.join(_SHARED_MOE_DUMP_DIR, f"layer{_SHARED_MOE_DUMP_LAYER}", f"step{step}")
+    d = os.path.join(_SHARED_MOE_DUMP_DIR, f"step{_SHARED_MOE_DUMP_STEP}", f"layer{_SHARED_MOE_DUMP_LAYER}")
     os.makedirs(d, exist_ok=True)
     if isinstance(tensor, torch.Tensor):
-        try:
-            np.save(os.path.join(d, f"{name}.npy"), tensor.detach().cpu().float().numpy())
-        except Exception:
-            try:
-                np.save(os.path.join(d, f"{name}.npy"), tensor.detach().cpu().to(torch.float32).numpy())
-            except Exception:
-                np.save(os.path.join(d, f"{name}_raw.npy"), tensor.detach().cpu().numpy())
-        with open(os.path.join(d, f"{name}_meta.txt"), "w") as f:
-            f.write(f"name={name}\nshape={list(tensor.shape)}\ndtype={tensor.dtype}\n")
+        torch.save(tensor.cpu(), os.path.join(d, f"{name}.pt"))
 
 
 @dataclass
