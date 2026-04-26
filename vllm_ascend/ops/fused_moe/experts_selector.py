@@ -292,23 +292,30 @@ def _select_experts_with_fusion_ops(
             tid2eid_ones = None
         _selector_dump(router_logits, "gate_router_logits_before_hash_gating")
 
-        print("=" * 80)
-        print("[moe_gating_top_k_hash] INPUTS:")
-        print(f"  x (router_logits): dtype={router_logits.dtype}, norm={router_logits.float().norm():.6f}, device={router_logits.device}")
-        print(f"  {router_logits}")
-        print(f"  k={top_k}, k_group={topk_group}, group_count={num_expert_group}")
-        print(f"  routed_scaling_factor={routed_scaling_factor}, norm_type=2, group_select_mode=1")
-        if e_score_correction_bias is not None:
-            print(f"  bias: dtype={e_score_correction_bias.dtype}, norm={e_score_correction_bias.float().norm():.6f}")
-            print(f"  {e_score_correction_bias}")
-        else:
-            print(f"  bias=None")
-        if input_ids is not None:
-            print(f"  input_ids: dtype={input_ids.dtype}, norm={input_ids.float().norm():.6f}, device={input_ids.device}")
-            print(f"  {input_ids}")
-        if tid2eid_ones is not None:
-            print(f"  tid2eid: dtype={tid2eid_ones.dtype}, shape={list(tid2eid_ones.shape)}")
-        print("-" * 80)
+        _rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        if _rank == 0:
+            print("=" * 80)
+            print("[moe_gating_top_k_hash] INPUTS:")
+            print(f"  x (router_logits): dtype={router_logits.dtype}, norm={router_logits.float().norm():.6f}, device={router_logits.device}")
+            print(f"  {router_logits}")
+            print(f"  k={top_k}, k_group={topk_group}, group_count={num_expert_group}")
+            print(f"  routed_scaling_factor={routed_scaling_factor}, norm_type=2, group_select_mode=1")
+            if e_score_correction_bias is not None:
+                print(f"  bias: dtype={e_score_correction_bias.dtype}, norm={e_score_correction_bias.float().norm():.6f}")
+                print(f"  {e_score_correction_bias}")
+            else:
+                print(f"  bias: None")
+            if input_ids is not None:
+                print(f"  input_ids: dtype={input_ids.dtype}, norm={input_ids.float().norm():.6f}, device={input_ids.device}")
+                print(f"  {input_ids}")
+            else:
+                print(f"  input_ids: None")
+            if tid2eid_ones is not None:
+                print(f"  tid2eid: dtype={tid2eid_ones.dtype}, shape={list(tid2eid_ones.shape)}")
+                print(f"  {tid2eid_ones}")
+            else:
+                print(f"  tid2eid: None")
+            print("-" * 80)
 
         topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k_hash(
             x=router_logits,
@@ -326,12 +333,13 @@ def _select_experts_with_fusion_ops(
             out_flag=False
         )
 
-        print("[moe_gating_top_k_hash] OUTPUTS:")
-        print(f"  topk_weights: dtype={topk_weights.dtype}, norm={topk_weights.float().norm():.6f}, device={topk_weights.device}")
-        print(f"  {topk_weights}")
-        print(f"  topk_ids: dtype={topk_ids.dtype}, norm={topk_ids.float().norm():.6f}, device={topk_ids.device}")
-        print(f"  {topk_ids}")
-        print("=" * 80)
+        if _rank == 0:
+            print("[moe_gating_top_k_hash] OUTPUTS:")
+            print(f"  topk_weights: dtype={topk_weights.dtype}, norm={topk_weights.float().norm():.6f}, device={topk_weights.device}")
+            print(f"  {topk_weights}")
+            print(f"  topk_ids: dtype={topk_ids.dtype}, norm={topk_ids.float().norm():.6f}, device={topk_ids.device}")
+            print(f"  {topk_ids}")
+            print("=" * 80)
 
         _selector_dump(topk_weights, "gate_hash_topk_weights")
         _selector_dump(topk_ids, "gate_hash_topk_ids")
