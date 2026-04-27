@@ -407,7 +407,6 @@ class DeepseekV4MoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        _dump_set_layer(self.layer_idx)
         _dump_tensor(hidden_states, "moe_input_hidden_states", self.layer_idx)
 
         if self.is_sequence_parallel:
@@ -814,24 +813,24 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.hc_ffn_scale = nn.Parameter(torch.empty(3,dtype = torch.float32))
         
 
-    def hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
-        _dump_sub(x, "input_hidden_states", "mhc_hc_pre")
-        _dump_sub(hc_fn, "weight", "mhc_hc_pre")
-        _dump_sub(hc_scale, "input_scale", "mhc_hc_pre")
-        _dump_sub(hc_base, "input_base", "mhc_hc_pre")
+    def hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor, hc_type: str):
+        _dump_sub(x, "input_hidden_states", f"{hc_type}_hc_pre")
+        _dump_sub(hc_fn, "weight", f"{hc_type}_hc_pre")
+        _dump_sub(hc_scale, "input_scale", f"{hc_type}_hc_pre")
+        _dump_sub(hc_base, "input_base", f"{hc_type}_hc_pre")
         y = torch.ops._C_ascend.npu_hc_pre(
             x, hc_fn, hc_scale, hc_base, self.hc_mult, self.hc_sinkhorn_iters, self.norm_eps, self.hc_eps)
-        _dump_sub(y, "output", "mhc_hc_pre")
+        _dump_sub(y, "output", f"{hc_type}_hc_pre")
         return y
 
-    def hc_post(self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor):
-        _dump_sub(x, "input_hidden_states", "mhc_hc_post")
-        _dump_sub(residual, "input_residual", "mhc_hc_post")
-        _dump_sub(post, "input_post", "mhc_hc_post")
-        _dump_sub(comb, "input_comb", "mhc_hc_post")
+    def hc_post(self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor, hc_type: str):
+        _dump_sub(x, "input_hidden_states", f"{hc_type}_hc_post")
+        _dump_sub(residual, "input_residual", f"{hc_type}_hc_post")
+        _dump_sub(post, "input_post", f"{hc_type}_hc_post")
+        _dump_sub(comb, "input_comb", f"{hc_type}_hc_post")
         y = torch.ops._C_ascend.npu_hc_post(
             x.unsqueeze(dim=0), residual.unsqueeze(dim=0), post.unsqueeze(dim=0), comb.unsqueeze(dim=0))
-        _dump_sub(y, "output", "mhc_hc_post")
+        _dump_sub(y, "output", f"{hc_type}_hc_post")
         return y.squeeze(dim=0)
     
     def forward(
@@ -841,8 +840,10 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         llama_4_scaling: torch.Tensor | None = None
     ) -> torch.Tensor:
+        from vllm_ascend.models.deepseek_v4 import _dump_set_layer
+        _dump_set_layer(self.layer_idx)
         residual = hidden_states.clone()
-        hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
+        hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base, "attention")
         hidden_states = self.input_layernorm(hidden_states)
         attn_kwargs = {
             "positions": positions,
@@ -850,12 +851,12 @@ class DeepseekV2DecoderLayer(nn.Module):
             "llama_4_scaling": llama_4_scaling
         }
         hidden_states = self.self_attn(**attn_kwargs)
-        hidden_states = self.hc_post(hidden_states, residual, post, comb)
+        hidden_states = self.hc_post(hidden_states, residual, post, comb, "attention")
         residual = hidden_states.clone()
-        hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
+        hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base, "ffn")
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = self.hc_post(hidden_states, residual, post, comb)
+        hidden_states = self.hc_post(hidden_states, residual, post, comb, "ffn")
 
         return hidden_states, residual
 

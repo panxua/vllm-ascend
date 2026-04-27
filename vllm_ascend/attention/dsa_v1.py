@@ -1318,6 +1318,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         _dump_sub(hidden_states, "input_hidden_states", "attention_ds_attention")
 
         # q_a_proj
+        _dump_sub(hidden_states, "input_hidden_states", "attention_q_a_proj")
         qr = self.q_norm(self.wq_a(hidden_states))
         _dump_sub(qr, "output_qr", "attention_q_a_proj")
         # q_b_proj
@@ -1536,6 +1537,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         # q_a_proj
         if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and \
                 isinstance(self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod):
+                _dump_sub(hidden_states, "input_hidden_states", "attention_q_a_proj")
                 q_a = self.wq_a(hidden_states)
                 qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                     q_a, 
@@ -1554,6 +1556,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ).unflatten(-1, (self.n_local_heads, self.head_dim))
                 _dump_sub(q, "output_q", "attention_q_b_proj")
         else:
+            _dump_sub(hidden_states, "input_hidden_states", "attention_q_a_proj")
             qr = q = self.q_norm(self.wq_a(hidden_states))
             _dump_sub(qr, "output_qr", "attention_q_a_proj")
             q = self.wq_b(q).unflatten(-1, (self.n_local_heads, self.head_dim))
