@@ -626,9 +626,9 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             return_with_event=True,
         )
         routed_out = fused_moe_results.routed_out
-        _moe_dump_sub(routed_out, "output", "ffn_forward")
 
         if self._shared_experts is None:
+            _moe_dump_sub(routed_out, "output", "ffn_forward")
             return routed_out
         elif self.multistream_overlap_gate:
             fc3_context = get_flash_common3_context()
@@ -643,5 +643,6 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
                     before_combine=fused_moe_results.before_combine_evt,
                 ))
 
+        _moe_dump_sub(shared_out, "output", "ffn_forward")
         _moe_dump_sub(shared_out, "output", "ffn_shared_experts")
         return shared_out, routed_out

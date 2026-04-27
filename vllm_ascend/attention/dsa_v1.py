@@ -750,6 +750,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             has_cmp_kv=False,
             device=str(self.seqused_q.device)
         )
+        _moe_dump_sub(sas_c1_metadata, "output", "dsa_sas_c1_metadata")
         
         sas_c4_metadata = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
             num_heads_q=n_local_heads,
@@ -776,6 +777,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             has_cmp_kv=True,
             device=str(self.seqused_q.device)
         )
+        _moe_dump_sub(sas_c4_metadata, "output", "dsa_sas_c4_metadata")
         
         sas_c128_metadata = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
             num_heads_q=n_local_heads,
@@ -800,8 +802,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             has_cmp_kv=True,
             device=str(self.seqused_q.device)
         )
+        _moe_dump_sub(sas_c128_metadata, "output", "dsa_sas_c128_metadata")
         
-        
+
         qli_metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_metadata(
             actual_seq_lengths_query=prefill_query_start_loc[1:].clone(),
             actual_seq_lengths_key=self.seq_lens[reqs_start:].clone(),
@@ -822,6 +825,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cmp_ratio = 4,
             device=str(self.seqused_q.device)
         )
+        _moe_dump_sub(qli_metadata, "output", "dsa_qli_metadata")
     
         return AscendDSAPrefillMetadata(
             attn_mask=self.attn_mask_builder.get_final_mla_mask(
@@ -955,6 +959,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 has_cmp_kv=False,
                 device=str(self.seqused_q.device)
             )
+            _moe_dump_sub(self.decode_sas_c1_metadata, "output", "dsa_sas_c1_metadata")
         elif self.compressor_ratio == 4:
             self.decode_sas_c4_metadata[:1024] = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
                 num_heads_q=n_local_heads,
@@ -981,6 +986,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 has_cmp_kv=True,
                 device=str(self.seqused_q.device)
             )
+            _moe_dump_sub(self.decode_sas_c4_metadata, "output", "dsa_sas_c4_metadata")
         else:
             self.decode_sas_c128_metadata[:1024] = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
                 num_heads_q=n_local_heads,
@@ -1005,7 +1011,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 has_cmp_kv=True,
                 device=str(self.seqused_q.device)
             )
-          
+            _moe_dump_sub(self.decode_sas_c128_metadata, "output", "dsa_sas_c128_metadata")
+
         self.decode_qli_metadata[:1024] = torch.ops._C_ascend.npu_quant_lightning_indexer_metadata(
             actual_seq_lengths_query=query_start_loc[1:].clone(),
             actual_seq_lengths_key=self.seq_lens[:self.num_decodes].clone(),
@@ -1026,6 +1033,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cmp_ratio = 4,
             device=str(self.seqused_q.device)
         )
+        _moe_dump_sub(self.decode_qli_metadata, "output", "dsa_qli_metadata")
         decode_metadata = AscendDSADecodeMetadata(
             input_positions=input_positions,
             block_table=self.block_table[:block_table_size, ...],
