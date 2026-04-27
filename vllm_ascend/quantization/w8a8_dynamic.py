@@ -231,8 +231,8 @@ class AscendW8A8DynamicFusedMoEMethod:
         assert topk_ids is not None
         assert topk_weights is not None
 
-        _moe_dump_sub(x, "hidden_states", "ffn/dynamic_quant")
-        _moe_dump_sub(router_logits, "router_logits", "ffn/dynamic_quant")
+        _moe_dump_sub(x, "input_hidden_states", "ffn_dynamic_quant")
+        _moe_dump_sub(router_logits, "input_router_logits", "ffn_dynamic_quant")
 
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
@@ -254,8 +254,8 @@ class AscendW8A8DynamicFusedMoEMethod:
         assert topk_weights is not None
         topk_weights = topk_weights.to(self.in_dtype)
 
-        _moe_dump_sub(topk_weights, "topk_weights", "ffn/moe_active_topk")
-        _moe_dump_sub(topk_ids, "topk_ids", "ffn/moe_active_topk")
+        _moe_dump_sub(topk_weights, "output_topk_weights", "ffn_moe_active_topk")
+        _moe_dump_sub(topk_ids, "output_topk_ids", "ffn_moe_active_topk")
 
         moe_comm_method = get_forward_context().moe_comm_method
         # When VLLM_ASCEND_ENABLE_FUSED_MC2 == 2, use dispatch_gmm_combine_decode, need fp32 scale
@@ -295,12 +295,12 @@ class AscendW8A8DynamicFusedMoEMethod:
             dynamic_eplb=self.dynamic_eplb,
             mc2_mask=kwargs.get("mc2_mask", None))
 
-        _moe_dump_sub(final_hidden_states, "fused_experts_output", "ffn/moe_combine_result")
+        _moe_dump_sub(final_hidden_states, "input", "ffn_moe_combine_result")
         if not self.dynamic_eplb:
-            _moe_dump_sub(layer.w13_weight, "w13_weight", "ffn/group_gemm1")
-            _moe_dump_sub(layer.w2_weight, "w2_weight", "ffn/group_gemm1")
-            _moe_dump_sub(layer.w13_weight_scale, "w13_weight_scale", "ffn/group_gemm1")
-            _moe_dump_sub(layer.w2_weight_scale, "w2_weight_scale", "ffn/group_gemm1")
+            _moe_dump_sub(layer.w13_weight, "weight_w13", "ffn_group_gemm1")
+            _moe_dump_sub(layer.w2_weight, "weight_w2", "ffn_group_gemm1")
+            _moe_dump_sub(layer.w13_weight_scale, "weight_w13_scale", "ffn_group_gemm1")
+            _moe_dump_sub(layer.w2_weight_scale, "weight_w2_scale", "ffn_group_gemm1")
 
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result

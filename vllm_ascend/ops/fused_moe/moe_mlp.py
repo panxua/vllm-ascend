@@ -104,8 +104,8 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
     bias1, bias2 = None, None
     _output_dtype = w2_scale[0].dtype
 
-    _moe_dump_sub(hidden_states, "input", "ffn/group_gemm1")
-    _moe_dump_sub(group_list, "group_list", "ffn/group_gemm1")
+    _moe_dump_sub(hidden_states, "input", "ffn_group_gemm1")
+    _moe_dump_sub(group_list, "input_group_list", "ffn_group_gemm1")
 
     weight_prefetch_method = get_weight_prefetch_method()
     if weight_prefetch_method:
@@ -161,8 +161,8 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 activate_left=True,
                 quant_mode=1,
             )
-        _moe_dump_sub(hidden_states, "output", "ffn/dequant_swiglu_quant")
-        _moe_dump_sub(swiglu_out_scale, "swiglu_out_scale", "ffn/dequant_swiglu_quant")
+        _moe_dump_sub(hidden_states, "input", "ffn_dequant_swiglu_quant")
+        _moe_dump_sub(swiglu_out_scale, "output_scale", "ffn_dequant_swiglu_quant")
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
@@ -174,7 +174,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             group_type=0,
             group_list=group_list,
             output_dtype=w2_scale[0].dtype)[0]
-        _moe_dump_sub(hidden_states, "output", "ffn/group_gemm2")
+        _moe_dump_sub(hidden_states, "output", "ffn_group_gemm2")
     elif w1_offset is not None:
         # gmm1: gate_up_proj
         hidden_states = torch_npu.npu_grouped_matmul(
@@ -188,10 +188,10 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             group_list=group_list,
             output_dtype=_output_dtype)[0]
         dispose_tensor(unquantized_hidden_states)
-        _moe_dump_sub(hidden_states, "gate_up_output", "ffn/group_gemm1")
+        _moe_dump_sub(hidden_states, "input", "ffn_group_gemm1")
         # act_fn: swiglu
         hidden_states = torch_npu.npu_swiglu(hidden_states)
-        _moe_dump_sub(hidden_states, "swiglu_output", "ffn/activation")
+        _moe_dump_sub(hidden_states, "output", "ffn_activation")
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
@@ -203,7 +203,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             group_type=0,
             group_list=group_list,
             output_dtype=_output_dtype)[0]
-        _moe_dump_sub(hidden_states, "down_proj_output", "ffn/group_gemm2")
+        _moe_dump_sub(hidden_states, "output", "ffn_group_gemm2")
     else:
         if w1_scale_bias is not None:
             if group_list_type == 0:
@@ -268,7 +268,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 hidden_states = torch_npu.npu_swiglu(hidden_states)
                 hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(
                     hidden_states)
-        _moe_dump_sub(hidden_states, "gmm1_swiglu_output", "ffn/dequant_swiglu_quant")
+        _moe_dump_sub(hidden_states, "input", "ffn_dequant_swiglu_quant")
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
@@ -281,7 +281,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             group_type=0,
             group_list=group_list,
             output_dtype=_output_dtype)[0]
-        _moe_dump_sub(hidden_states, "gmm2_down_proj_output", "ffn/group_gemm2")
+        _moe_dump_sub(hidden_states, "output", "ffn_group_gemm2")
     return hidden_states
 
 

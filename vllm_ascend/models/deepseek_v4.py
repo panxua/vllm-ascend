@@ -415,20 +415,22 @@ class DeepseekV4MoE(nn.Module):
                 hidden_states=hidden_states, router_logits=hidden_states
             )
         else:
-            # gate/matmul
+            _moe_dump_sub(hidden_states, "input_hidden_states", "gate_matmul")
             router_logits = F.linear(hidden_states.float(), self.gate.weight)
-            _moe_dump_sub(router_logits, "router_logits", "gate/matmul")
-            _moe_dump_sub(self.gate.weight, "gate_weight", "gate/matmul")
+            _moe_dump_sub(router_logits, "output_router_logits", "gate_matmul")
+            _moe_dump_sub(self.gate.weight, "weight", "gate_matmul")
             if self.gate.e_score_correction_bias is not None:
-                _moe_dump_sub(self.gate.e_score_correction_bias, "e_score_correction_bias", "gate/matmul")
+                _moe_dump_sub(self.gate.e_score_correction_bias, "bias_e_score_correction", "gate_matmul")
             fused_moe_out = self.experts(
                 hidden_states=hidden_states, router_logits=router_logits
             )
 
         shared_output, final_hidden_states = fused_moe_out
-        _moe_dump_sub(final_hidden_states, "routed_experts_output", "gate/final_outputs")
+        _moe_dump_sub(hidden_states, "input_routed", "gate_final")
+        _moe_dump_sub(final_hidden_states, "output_routed", "gate_final")
         if shared_output is not None:
-            _moe_dump_sub(shared_output, "shared_experts_output", "gate/final_outputs")
+            _moe_dump_sub(hidden_states, "input_shared", "gate_final")
+            _moe_dump_sub(shared_output, "output_shared", "gate_final")
         if self.shared_experts is None:
             assert shared_output is None
 
@@ -443,7 +445,6 @@ class DeepseekV4MoE(nn.Module):
             assert shared_output is not None
             final_hidden_states = muls_add_triton(shared_output, final_hidden_states, 1.0 / self.routed_scaling_factor)
 
-        _moe_dump_sub(final_hidden_states, "renormalized_output", "gate/renormalize_topk_weights")
         _moe_dump_tensor(final_hidden_states, "moe_final_output_before_allreduce", self.layer_idx)
 
         if self.is_sequence_parallel:
@@ -811,13 +812,23 @@ class DeepseekV2DecoderLayer(nn.Module):
         
 
     def hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
+        _moe_dump_sub(x, "input_hidden_states", "mhc_hc_pre")
+        _moe_dump_sub(hc_fn, "weight", "mhc_hc_pre")
+        _moe_dump_sub(hc_scale, "input_scale", "mhc_hc_pre")
+        _moe_dump_sub(hc_base, "input_base", "mhc_hc_pre")
         y = torch.ops._C_ascend.npu_hc_pre(
             x, hc_fn, hc_scale, hc_base, self.hc_mult, self.hc_sinkhorn_iters, self.norm_eps, self.hc_eps)
+        _moe_dump_sub(y, "output", "mhc_hc_pre")
         return y
 
     def hc_post(self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor):
+        _moe_dump_sub(x, "input_hidden_states", "mhc_hc_post")
+        _moe_dump_sub(residual, "input_residual", "mhc_hc_post")
+        _moe_dump_sub(post, "input_post", "mhc_hc_post")
+        _moe_dump_sub(comb, "input_comb", "mhc_hc_post")
         y = torch.ops._C_ascend.npu_hc_post(
             x.unsqueeze(dim=0), residual.unsqueeze(dim=0), post.unsqueeze(dim=0), comb.unsqueeze(dim=0))
+        _moe_dump_sub(y, "output", "mhc_hc_post")
         return y.squeeze(dim=0)
     
     def forward(

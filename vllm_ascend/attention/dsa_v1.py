@@ -1267,7 +1267,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
-        _moe_dump_sub(o_proj_input, "o_proj_input_after_output_rope", "attention/output_rope")
+        _moe_dump_sub(o_proj_input, "output", "attention_output_rope")
 
         # o_a_proj
         o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, -1)
@@ -1276,11 +1276,11 @@ class AscendDSAImpl(DSAAttentionImpl):
         else:
             o_proj_input = torch_npu.npu_transpose_batchmatmul(o_proj_input, self.wo_a.weight, bias=None, scale=None, perm_x1=(1,0,2), perm_x2=(0,1,2), perm_y=(1,0,2), batch_split_factor=1)
             o_proj_input = o_proj_input.reshape(num_tokens, -1)
-        _moe_dump_sub(o_proj_input, "o_proj_input_after_o_a_proj", "attention/o_a_proj")
+        _moe_dump_sub(o_proj_input, "output", "attention_o_a_proj")
 
         # o_b_proj
         output[...] = self.wo_b(o_proj_input)
-        _moe_dump_sub(output, "output_after_o_b_proj", "attention/o_b_proj")
+        _moe_dump_sub(output, "output", "attention_o_b_proj")
 
         return output_padded
 
@@ -1307,43 +1307,49 @@ class AscendDSAImpl(DSAAttentionImpl):
         compressed_kv_block_table = attn_metadata.prefill.block_table
         compressed_kv_slot_mapping = attn_metadata.prefill.slot_mapping
 
-        _moe_dump_sub(hidden_states, "hidden_states", "attention/ds_attention")
+        _moe_dump_sub(hidden_states, "input_hidden_states", "attention_ds_attention")
 
         # q_a_proj
         qr = self.q_norm(self.wq_a(hidden_states))
-        _moe_dump_sub(qr, "qr_after_q_a_proj", "attention/q_a_proj")
+        _moe_dump_sub(qr, "output_qr", "attention_q_a_proj")
         # q_b_proj
         q = self.wq_b(qr).unflatten(-1, (self.n_local_heads, self.head_dim))
-        _moe_dump_sub(q, "q_after_q_b_proj", "attention/q_b_proj")
+        _moe_dump_sub(q, "output_q", "attention_q_b_proj")
         # q_rmsnorm
         q = triton_q_rms(q, self.eps)
-        _moe_dump_sub(q, "q_after_q_rmsnorm", "attention/q_rmsnorm")
+        _moe_dump_sub(q, "output_q", "attention_q_rmsnorm")
 
         # rope_q
+        _moe_dump_sub(q, "input_q", "attention_q_rope")
+        _moe_dump_sub(cos, "input_cos", "attention_q_rope")
+        _moe_dump_sub(sin, "input_sin", "attention_q_rope")
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             q.unsqueeze(1), cos, sin,
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
-        _moe_dump_sub(q, "q_after_rope", "attention/rope_q")
+        _moe_dump_sub(q, "output_q", "attention_q_rope")
 
         # kv_proj
         kv = self.wkv(hidden_states)
-        _moe_dump_sub(kv, "kv_after_kv_proj", "attention/kv_proj")
+        _moe_dump_sub(kv, "output_kv", "attention_kv_proj")
         # kv_layernorm
         kv = self.kv_norm(kv)
-        _moe_dump_sub(kv, "kv_after_kv_layernorm", "attention/kv_layernorm")
+        _moe_dump_sub(kv, "output_kv", "attention_kv_layernorm")
         kv = kv.view(-1, 1, self.nope_head_dim+self.rope_head_dim)
 
         # rope_kv
+        _moe_dump_sub(kv, "input_kv", "attention_kv_rope")
+        _moe_dump_sub(cos, "input_cos", "attention_kv_rope")
+        _moe_dump_sub(sin, "input_sin", "attention_kv_rope")
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             kv.unsqueeze(1), cos, sin,
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
-        _moe_dump_sub(kv, "kv_after_rope", "attention/rope_kv")
+        _moe_dump_sub(kv, "output_kv", "attention_kv_rope")
 
-        _moe_dump_sub(kv, "ori_kv_before_scatter", "attention/scatter_ori_kv")
+        _moe_dump_sub(kv, "input_kv", "attention_scatter_ori_kv")
 
         compress_cos = attn_metadata.prefill.compress_cos[layer_name]
         compress_sin = attn_metadata.prefill.compress_sin[layer_name]
@@ -1365,17 +1371,17 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             coff = 2 if self.compressor_overlap else 1
 
-            _moe_dump_sub(hidden_states, "hidden_states", "attention/compressor/kernel")
-            _moe_dump_sub(self.compressor_wkv.weight, "wkv_weight", "attention/compressor/kernel")
-            _moe_dump_sub(self.compressor_wgate.weight, "wgate_weight", "attention/compressor/kernel")
-            _moe_dump_sub(self.compressor_ape, "ape_weight", "attention/compressor/kernel")
-            _moe_dump_sub(self.compressor_norm.weight, "norm_weight", "attention/compressor/kernel")
-            _moe_dump_sub(compress_sin, "compress_sin", "attention/compressor/kernel")
-            _moe_dump_sub(compress_cos, "compress_cos", "attention/compressor/kernel")
-            _moe_dump_sub(attn_metadata.prefill.state_block_table, "block_table", "attention/compressor/kernel")
-            _moe_dump_sub(actual_seq_lengths_query, "cu_seqlens", "attention/compressor/kernel")
+            _moe_dump_sub(hidden_states, "hidden_states", "compressor")
+            _moe_dump_sub(self.compressor_wkv.weight, "wkv_weight", "compressor")
+            _moe_dump_sub(self.compressor_wgate.weight, "wgate_weight", "compressor")
+            _moe_dump_sub(self.compressor_ape, "ape_weight", "compressor")
+            _moe_dump_sub(self.compressor_norm.weight, "norm_weight", "compressor")
+            _moe_dump_sub(compress_sin, "compress_sin", "compressor")
+            _moe_dump_sub(compress_cos, "compress_cos", "compressor")
+            _moe_dump_sub(attn_metadata.prefill.state_block_table, "block_table", "compressor")
+            _moe_dump_sub(actual_seq_lengths_query, "cu_seqlens", "compressor")
             if attn_metadata.prefill.start_pos is not None:
-                _moe_dump_sub(attn_metadata.prefill.start_pos, "start_pos", "attention/compressor/kernel")
+                _moe_dump_sub(attn_metadata.prefill.start_pos, "start_pos", "compressor")
 
             # compressor
             compressed_kv,_,_,_,_ = torch.ops._C_ascend.compressor(
@@ -1401,7 +1407,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 enable_grad=False
             )
 
-            _moe_dump_sub(compressed_kv, "output_compressed_kv", "attention/compressor")
+            _moe_dump_sub(compressed_kv, "output", "compressor")
 
             if compressed_kv.numel() == 0:
                 compressed_kv = None
@@ -1412,7 +1418,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                                 kv_cache[0].view(-1, compressed_kv.shape[-1]),
                                 compressed_kv_slot_mapping.unsqueeze(-1),
                                 compressed_kv.view(-1, compressed_kv.shape[-1]))
-                _moe_dump_sub(compressed_kv, "cmp_kv_after_scatter", "attention/scatter_cmp_kv")
+                _moe_dump_sub(compressed_kv, "output", "scatter_cmp_kv")
 
         if self.enable_kv_tnd:
             sliding_window_kv = cat_swa_to_kv(kv, kv_state[0], actual_seq_lengths_query, attn_metadata.prefill.chunked_context, block_size=128)
@@ -1483,7 +1489,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 layout_kv="TND" if self.enable_kv_tnd else "PA_ND"
             )[0]
 
-        _moe_dump_sub(attn_output, "sparse_attn_output", "attention/sparse_attn_sharedkv")
+        _moe_dump_sub(attn_output, "output", "attention_sparse_attn")
 
         # swa exec kv
         torch_npu.npu_scatter_nd_update_(
@@ -1517,19 +1523,19 @@ class AscendDSAImpl(DSAAttentionImpl):
         wait_hidden_state_cal_event = torch.npu.current_stream().record_event() \
             if self.multistream_dsa_preprocess else None
 
-        _moe_dump_sub(hidden_states, "hidden_states", "attention/ds_attention")
+        _moe_dump_sub(hidden_states, "input_hidden_states", "attention_ds_attention")
 
         # q_a_proj
         if (not isinstance(self.wq_b.quant_method, AscendUnquantizedLinearMethod)) and \
                 isinstance(self.wq_b.quant_method.quant_method, AscendW8A8DynamicLinearMethod):
                 q_a = self.wq_a(hidden_states)
-                _moe_dump_sub(q_a, "q_a_output", "attention/q_a_proj")
                 qr, qr_pertoken_scale = torch.ops._C_ascend.npu_rms_norm_dynamic_quant(
                     q_a, 
                     self.q_norm.weight,
                     epsilon=self.eps
                 )
-                _moe_dump_sub(qr, "qr_after_q_a_layernorm", "attention/q_a_layernorm")
+                _moe_dump_sub(qr, "input", "attention_q_a_layernorm")
+                _moe_dump_sub(qr, "output", "attention_q_a_layernorm")
                 q = torch_npu.npu_quant_matmul(
                     qr,
                     self.wq_b.weight,
@@ -1538,25 +1544,28 @@ class AscendDSAImpl(DSAAttentionImpl):
                     bias=self.wq_b.bias,
                     output_dtype=hidden_states.dtype,
                 ).unflatten(-1, (self.n_local_heads, self.head_dim))
-                _moe_dump_sub(q, "q_after_q_b_proj", "attention/q_b_proj")
+                _moe_dump_sub(q, "output_q", "attention_q_b_proj")
         else:
             qr = q = self.q_norm(self.wq_a(hidden_states))
-            _moe_dump_sub(qr, "qr_after_q_a_proj", "attention/q_a_proj")
+            _moe_dump_sub(qr, "output_qr", "attention_q_a_proj")
             q = self.wq_b(q).unflatten(-1, (self.n_local_heads, self.head_dim))
-            _moe_dump_sub(q, "q_after_q_b_proj", "attention/q_b_proj")
+            _moe_dump_sub(q, "output_q", "attention_q_b_proj")
             qr_pertoken_scale = None
             
         # q_rmsnorm
         q = triton_q_rms(q, self.eps)
-        _moe_dump_sub(q, "q_after_q_rmsnorm", "attention/q_rmsnorm")
+        _moe_dump_sub(q, "output_q", "attention_q_rmsnorm")
 
         # rope_q
+        _moe_dump_sub(q, "input_q", "attention_q_rope")
+        _moe_dump_sub(cos, "input_cos", "attention_q_rope")
+        _moe_dump_sub(sin, "input_sin", "attention_q_rope")
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             q.unsqueeze(1), cos, sin,
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
-        _moe_dump_sub(q, "q_after_rope", "attention/rope_q")
+        _moe_dump_sub(q, "output_q", "attention_q_rope")
 
         with npu_stream_switch(attention_calculation_stream(), enabled=self.multistream_dsa_preprocess):
             if wait_hidden_state_cal_event:
@@ -1564,22 +1573,25 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             # kv_proj
             kv = self.wkv(hidden_states)
-            _moe_dump_sub(kv, "kv_after_kv_proj", "attention/kv_proj")
+            _moe_dump_sub(kv, "output_kv", "attention_kv_proj")
             # kv_layernorm
             kv = self.kv_norm(kv)
-            _moe_dump_sub(kv, "kv_after_kv_layernorm", "attention/kv_layernorm")
+            _moe_dump_sub(kv, "output_kv", "attention_kv_layernorm")
             kv = kv.view(-1, 1, self.nope_head_dim+self.rope_head_dim)
 
             # rope_kv
+            _moe_dump_sub(kv, "input_kv", "attention_kv_rope")
+            _moe_dump_sub(cos, "input_cos", "attention_kv_rope")
+            _moe_dump_sub(sin, "input_sin", "attention_kv_rope")
             torch.ops._C_ascend.inplace_partial_rotary_mul(
                 kv.unsqueeze(1), cos, sin,
                 rotary_mode="interleave",
                 partial_slice=[self.nope_head_dim, self.head_dim],
             )
-            _moe_dump_sub(kv, "kv_after_rope", "attention/rope_kv")
+            _moe_dump_sub(kv, "output_kv", "attention_kv_rope")
 
             # scatter_ori_kv
-            _moe_dump_sub(kv, "ori_kv_before_scatter", "attention/scatter_ori_kv")
+            _moe_dump_sub(kv, "input_kv", "attention_scatter_ori_kv")
             torch_npu.npu_scatter_nd_update_(
                 kv_state[0].view(-1, kv.shape[-1]),
                 attn_metadata.decode.swa_slot_mapping.unsqueeze(-1),
@@ -1613,17 +1625,17 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             coff = 2 if self.compressor_overlap else 1
 
-            _moe_dump_sub(hidden_states, "hidden_states", "attention/compressor/kernel")
-            _moe_dump_sub(self.compressor_wkv.weight, "wkv_weight", "attention/compressor/kernel")
-            _moe_dump_sub(self.compressor_wgate.weight, "wgate_weight", "attention/compressor/kernel")
-            _moe_dump_sub(self.compressor_ape, "ape_weight", "attention/compressor/kernel")
-            _moe_dump_sub(self.compressor_norm.weight, "norm_weight", "attention/compressor/kernel")
-            _moe_dump_sub(compress_sin, "compress_sin", "attention/compressor/kernel")
-            _moe_dump_sub(compress_cos, "compress_cos", "attention/compressor/kernel")
-            _moe_dump_sub(attn_metadata.decode.state_block_table, "block_table", "attention/compressor/kernel")
-            _moe_dump_sub(actual_seq_lengths_query, "cu_seqlens", "attention/compressor/kernel")
+            _moe_dump_sub(hidden_states, "hidden_states", "compressor")
+            _moe_dump_sub(self.compressor_wkv.weight, "wkv_weight", "compressor")
+            _moe_dump_sub(self.compressor_wgate.weight, "wgate_weight", "compressor")
+            _moe_dump_sub(self.compressor_ape, "ape_weight", "compressor")
+            _moe_dump_sub(self.compressor_norm.weight, "norm_weight", "compressor")
+            _moe_dump_sub(compress_sin, "compress_sin", "compressor")
+            _moe_dump_sub(compress_cos, "compress_cos", "compressor")
+            _moe_dump_sub(attn_metadata.decode.state_block_table, "block_table", "compressor")
+            _moe_dump_sub(actual_seq_lengths_query, "cu_seqlens", "compressor")
             if attn_metadata.decode.start_pos is not None:
-                _moe_dump_sub(attn_metadata.decode.start_pos, "start_pos", "attention/compressor/kernel")
+                _moe_dump_sub(attn_metadata.decode.start_pos, "start_pos", "compressor")
 
             # compressor
             compressed_kv,_,_,_,_ = torch.ops._C_ascend.compressor(
@@ -1648,14 +1660,14 @@ class AscendDSAImpl(DSAAttentionImpl):
                 rotary_mode = 2,
                 enable_grad=False
             )
-            _moe_dump_sub(compressed_kv, "output_compressed_kv", "attention/compressor")
+            _moe_dump_sub(compressed_kv, "output", "compressor")
             # kv_compress_epilog
             if compressed_kv.numel() > 0:
                 torch_npu.npu_scatter_nd_update_(
                                 kv_cache[0].view(-1, compressed_kv.shape[-1]),
                                 compressed_kv_slot_mapping.unsqueeze(-1),
                                 compressed_kv.view(-1, compressed_kv.shape[-1]))
-                _moe_dump_sub(compressed_kv, "cmp_kv_after_scatter", "attention/scatter_cmp_kv")
+                _moe_dump_sub(compressed_kv, "output", "scatter_cmp_kv")
         if self.compress_ratio == 1:
             attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
                 q,
@@ -1714,7 +1726,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 layout_q="TND",
                 layout_kv="PA_ND"
             )[0]
-        _moe_dump_sub(attn_output, "sparse_attn_output", "attention/sparse_attn_sharedkv")
+        _moe_dump_sub(attn_output, "output", "attention_sparse_attn")
         return attn_output
 
     def indexer_select_qli(
