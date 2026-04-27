@@ -79,6 +79,15 @@ def save_tensor_as_pickle(tensor: torch.Tensor, path: str) -> None:
     torch.save(tensor.detach().cpu().contiguous(), path)
 
 
+def tensor_info(tensor: torch.Tensor | None) -> str:
+    if tensor is None:
+        return "None"
+    if not torch.is_tensor(tensor):
+        return f"type={type(tensor).__name__}"
+    return (f"shape={tuple(tensor.shape)} dtype={tensor.dtype} "
+            f"device={tensor.device} numel={tensor.numel()}")
+
+
 def set_dump_step(step: int):
     return _DUMP_STEP_CONTEXT.set(step)
 
@@ -110,6 +119,48 @@ def parse_layer_idx(layer_name: str | None) -> int | None:
             except ValueError:
                 return None
     return None
+
+
+def log_tensor_info(module: str,
+                    name: str,
+                    tensor: torch.Tensor | None,
+                    *,
+                    layer_idx: int | None = None) -> None:
+    if not dump_enabled():
+        return
+
+    step = _DUMP_STEP_CONTEXT.get()
+    if step is None:
+        step = 0
+    if step != 0:
+        logger.debug("Skip tensor info for %s/%s: step=%s is not 0.",
+                     module, name, step)
+        return
+
+    if layer_idx is None:
+        layer_idx = _DUMP_LAYER_CONTEXT.get()
+    logger.debug("Tensor info layer=%s %s/%s %s.", layer_idx, module, name,
+                 tensor_info(tensor))
+
+
+def log_mapping_info(module: str,
+                     prefix: str,
+                     value,
+                     *,
+                     layer_idx: int | None = None) -> None:
+    if torch.is_tensor(value) or value is None:
+        log_tensor_info(module, prefix, value, layer_idx=layer_idx)
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            log_mapping_info(module, f"{prefix}_{key}", item,
+                             layer_idx=layer_idx)
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        for idx, item in enumerate(value):
+            log_mapping_info(module, f"{prefix}_{idx}", item,
+                             layer_idx=layer_idx)
+    else:
+        logger.debug("Tensor info layer=%s %s/%s type=%s.",
+                     layer_idx, module, prefix, type(value).__name__)
 
 
 def dump_tensor(module: str,
@@ -164,8 +215,8 @@ def dump_tensor(module: str,
     try:
         save_tensor_as_pickle(tensor, path)
         logger.debug(
-            "Dumped tensor %s/%s to %s shape=%s device=%s.",
-            module, name, path, tuple(tensor.shape), tensor.device)
+            "Dumped tensor %s/%s to %s %s.",
+            module, name, path, tensor_info(tensor))
     except Exception:
         logger.exception("Failed to dump tensor %s/%s to %s.", module, name, path)
 

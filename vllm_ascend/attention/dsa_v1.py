@@ -32,8 +32,11 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, npu_stre
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.tensor_dump import (
+    current_dump_layer,
     dump_mapping,
     dump_tensor,
+    log_mapping_info,
+    log_tensor_info,
     parse_layer_idx,
 )
 
@@ -659,6 +662,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         prefill_input_positions = input_positions[tokens_start:]
         cos, sin = get_cos_and_sin_dsa(prefill_input_positions)
+        log_tensor_info("attention/prefill_metadata", "position_ids",
+                        prefill_input_positions,
+                        layer_idx=current_dump_layer())
+        log_mapping_info("attention/prefill_metadata", "cos", cos,
+                         layer_idx=current_dump_layer())
+        log_mapping_info("attention/prefill_metadata", "sin", sin,
+                         layer_idx=current_dump_layer())
 
         def _get_padded_compressed_position(prefill_input_positions, compress_ratio):
             if compress_ratio == 1:
@@ -678,7 +688,18 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 (torch.tensor([0], device=_cmp_seq_lens.device), 
                 torch.cumsum(_cmp_seq_lens, -1)), dim=-1)
 
-        compress_cos, compress_sin = get_cos_and_sin_dsa(_get_padded_compressed_position(prefill_input_positions, self.compressor_ratio))
+        compressed_prefill_positions = _get_padded_compressed_position(
+            prefill_input_positions, self.compressor_ratio)
+        compress_cos, compress_sin = get_cos_and_sin_dsa(
+            compressed_prefill_positions)
+        log_tensor_info("attention/prefill_metadata",
+                        "compressed_position_ids",
+                        compressed_prefill_positions,
+                        layer_idx=current_dump_layer())
+        log_mapping_info("attention/prefill_metadata", "compress_cos",
+                         compress_cos, layer_idx=current_dump_layer())
+        log_mapping_info("attention/prefill_metadata", "compress_sin",
+                         compress_sin, layer_idx=current_dump_layer())
 
         # tmp swa_block
         prefill_seq_lens = self.seq_lens[reqs_start:]
@@ -887,6 +908,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         cp_seq_len, batch_seq_mask = None, None
 
         cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=True)
+        log_tensor_info("attention/decode_metadata", "position_ids",
+                        input_positions, layer_idx=current_dump_layer())
+        log_mapping_info("attention/decode_metadata", "cos", cos,
+                         layer_idx=current_dump_layer())
+        log_mapping_info("attention/decode_metadata", "sin", sin,
+                         layer_idx=current_dump_layer())
 
         decode_input_positions = input_positions_cpu
 
@@ -904,9 +931,20 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             return gpu_pad_positions
 
         layer_name = f"c{self.compressor_ratio}"
+        compressed_decode_positions = _get_padded_compressed_position(
+            decode_input_positions, self.compressor_ratio,
+            input_positions.device)
         compress_cos, compress_sin = get_cos_and_sin_dsa(
-            {layer_name: _get_padded_compressed_position(decode_input_positions, self.compressor_ratio, input_positions.device)},
+            {layer_name: compressed_decode_positions},
             use_cache=True)
+        log_tensor_info("attention/decode_metadata",
+                        "compressed_position_ids",
+                        compressed_decode_positions,
+                        layer_idx=current_dump_layer())
+        log_mapping_info("attention/decode_metadata", "compress_cos",
+                         compress_cos, layer_idx=current_dump_layer())
+        log_mapping_info("attention/decode_metadata", "compress_sin",
+                         compress_sin, layer_idx=current_dump_layer())
 
 
         def _get_compressed_decode_token_start(decode_input_positions, compress_ratio):
@@ -1184,7 +1222,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             self.compressor_wkv = self.compressor.wkv
             self.compressor_wgate = self.compressor.wgate
             self.compressor_norm = self.compressor.norm
-        self.compressor_norm_eps = self.compressor.norm_eps
+            self.compressor_norm_eps = self.compressor.norm_eps
 
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
@@ -1197,6 +1235,14 @@ class AscendDSAImpl(DSAAttentionImpl):
     def _dump_map(self, module: str, name: str, value,
                   layer_name: str | None = None) -> None:
         dump_mapping(module, name, value, layer_idx=parse_layer_idx(layer_name))
+
+    def _log_tensor(self, module: str, name: str, tensor: torch.Tensor | None,
+                    layer_name: str | None = None) -> None:
+        log_tensor_info(module, name, tensor, layer_idx=parse_layer_idx(layer_name))
+
+    def _log_map(self, module: str, name: str, value,
+                 layer_name: str | None = None) -> None:
+        log_mapping_info(module, name, value, layer_idx=parse_layer_idx(layer_name))
 
 
     # TODO: cast to bfloat16 to speed up
@@ -1270,6 +1316,16 @@ class AscendDSAImpl(DSAAttentionImpl):
             o_proj_input[decode_tokens:actual_tokens] = output_prefill
             cos = attn_metadata.prefill.cos[layer_name]
             sin = attn_metadata.prefill.sin[layer_name]
+            self._log_tensor("attention/dsa_forward",
+                             "prefill_position_ids",
+                             attn_metadata.prefill.input_positions,
+                             layer_name)
+            self._log_map("attention/dsa_forward", "prefill_cos", cos,
+                          layer_name)
+            self._log_map("attention/dsa_forward", "prefill_sin", sin,
+                          layer_name)
+            self._dump("attention/dsa_forward", "prefill_position_ids",
+                       attn_metadata.prefill.input_positions, layer_name)
             self._dump_map("attention/dsa_forward", "prefill_cos", cos,
                            layer_name)
             self._dump_map("attention/dsa_forward", "prefill_sin", sin,
@@ -1287,6 +1343,16 @@ class AscendDSAImpl(DSAAttentionImpl):
             o_proj_input[:decode_tokens] = output_decode
             cos = attn_metadata.decode.cos[layer_name]
             sin = attn_metadata.decode.sin[layer_name]
+            self._log_tensor("attention/dsa_forward",
+                             "decode_position_ids",
+                             attn_metadata.decode.input_positions,
+                             layer_name)
+            self._log_map("attention/dsa_forward", "decode_cos", cos,
+                          layer_name)
+            self._log_map("attention/dsa_forward", "decode_sin", sin,
+                          layer_name)
+            self._dump("attention/dsa_forward", "decode_position_ids",
+                       attn_metadata.decode.input_positions, layer_name)
             self._dump_map("attention/dsa_forward", "decode_cos", cos,
                            layer_name)
             self._dump_map("attention/dsa_forward", "decode_sin", sin,
@@ -1294,6 +1360,8 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         cos = attn_metadata.cos[layer_name]
         sin = attn_metadata.sin[layer_name]
+        self._log_map("attention/output_rope", "input_cos", cos, layer_name)
+        self._log_map("attention/output_rope", "input_sin", sin, layer_name)
         self._dump_map("attention/output_rope", "input_cos", cos, layer_name)
         self._dump_map("attention/output_rope", "input_sin", sin, layer_name)
         self._dump("attention/output_rope", "input", o_proj_input, layer_name)
@@ -1344,8 +1412,14 @@ class AscendDSAImpl(DSAAttentionImpl):
         assert attn_metadata.prefill
         cos = attn_metadata.prefill.cos[layer_name]
         sin = attn_metadata.prefill.sin[layer_name]
+        self._log_tensor("attention/prefill", "position_ids",
+                         attn_metadata.prefill.input_positions, layer_name)
+        self._log_map("attention/prefill", "cos", cos, layer_name)
+        self._log_map("attention/prefill", "sin", sin, layer_name)
         self._dump("attention/prefill", "input_hidden_states", hidden_states,
                    layer_name)
+        self._dump("attention/prefill", "position_ids",
+                   attn_metadata.prefill.input_positions, layer_name)
         self._dump_map("attention/prefill", "cos", cos, layer_name)
         self._dump_map("attention/prefill", "sin", sin, layer_name)
         actual_seq_lengths_query = attn_metadata.prefill.query_start_loc
@@ -1599,8 +1673,14 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         cos = attn_metadata.decode.cos[layer_name]
         sin = attn_metadata.decode.sin[layer_name]
+        self._log_tensor("attention/decode", "position_ids",
+                         attn_metadata.decode.input_positions, layer_name)
+        self._log_map("attention/decode", "cos", cos, layer_name)
+        self._log_map("attention/decode", "sin", sin, layer_name)
         self._dump("attention/decode", "input_hidden_states", hidden_states,
                    layer_name)
+        self._dump("attention/decode", "position_ids",
+                   attn_metadata.decode.input_positions, layer_name)
         self._dump_map("attention/decode", "cos", cos, layer_name)
         self._dump_map("attention/decode", "sin", sin, layer_name)
         actual_seq_lengths_query = attn_metadata.decode.query_start_loc
