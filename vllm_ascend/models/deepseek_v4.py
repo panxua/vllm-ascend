@@ -83,7 +83,7 @@ from vllm_ascend.ops.dsa import DSAModules,AscendDeepseekSparseAttention
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils.tensor_dump import (
+from vllm_ascend.tensor_dump import (
     dump_module_io as _dump_module_io,
     dump_target_layer as _dump_target_layer,
     dump_tensor as _dump_tensor,

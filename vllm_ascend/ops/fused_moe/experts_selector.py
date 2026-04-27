@@ -23,7 +23,7 @@ from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.utils import split_tensor_along_first_dim
-from vllm_ascend.utils.tensor_dump import dump_tensor
+from vllm_ascend.tensor_dump import dump_tensor
 
 def select_experts(hidden_states: torch.Tensor,
                    router_logits: torch.Tensor,
@@ -273,7 +273,7 @@ def _select_experts_with_fusion_ops(
             forward_context = get_forward_context()
             input_ids = forward_context.input_ids.to(torch.int64)
             # tid2eid_ones = torch.ones(tid2eid.shape[0],tid2eid.shape[1],device=router_logits.device,dtype=torch.int32)
-            tid2eid_ones = tid2eid.to(torch.int32)    
+            tid2eid_ones = tid2eid.to(torch.int32)
             if forward_context.moe_comm_type == MoECommType.ALLGATHER:
                 prepare_finalize = forward_context.moe_comm_method.prepare_finalize
                 input_ids = prepare_finalize.all_gather_input_id_with_dp_group(input_ids)
@@ -329,7 +329,7 @@ def _select_experts_with_fusion_ops(
         weights = original_scores.gather(1, topk_ids)
         weights /= weights.sum(dim=-1, keepdim=True)
         weights *= routed_scaling_factor
-        
+
 
         return weights, topk_ids.to(torch.int32)
     elif scoring_func == "softmax":

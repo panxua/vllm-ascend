@@ -34,7 +34,7 @@ from vllm_ascend.ops.fused_moe.comm_utils import (
     async_all_to_all, gather_from_sequence_parallel_region)
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
                                is_hierarchical_communication_enabled)
-from vllm_ascend.utils.tensor_dump import dump_mapping, dump_tensor
+from vllm_ascend.tensor_dump import dump_mapping, dump_tensor
 
 
 @dataclass

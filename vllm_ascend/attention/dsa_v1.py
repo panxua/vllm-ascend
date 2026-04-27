@@ -31,7 +31,7 @@ from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, npu_stre
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type, npu_stream_switch, attention_calculation_stream
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.utils.tensor_dump import (
+from vllm_ascend.tensor_dump import (
     dump_mapping,
     dump_tensor,
     parse_layer_idx,

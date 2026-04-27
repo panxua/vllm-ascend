@@ -7,10 +7,13 @@ from collections.abc import Mapping, Sequence
 
 import torch
 from torch import nn
-from vllm.distributed import get_tensor_model_parallel_rank
-from vllm.logger import init_logger
+import logging
 
-logger = init_logger(__name__)
+try:
+    from vllm.logger import init_logger
+    logger = init_logger(__name__)
+except Exception:
+    logger = logging.getLogger(__name__)
 
 _DUMP_STEP_CONTEXT: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "xllm_dump_step", default=None)
@@ -59,6 +62,7 @@ def dump_rank() -> int:
             logger.debug("Invalid RANK=%r; fallback to tensor parallel rank.", rank)
 
     try:
+        from vllm.distributed import get_tensor_model_parallel_rank
         return get_tensor_model_parallel_rank()
     except Exception:
         return 0

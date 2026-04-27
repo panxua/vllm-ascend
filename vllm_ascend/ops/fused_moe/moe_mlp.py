@@ -26,7 +26,7 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import (AscendDeviceType, dispose_tensor,
                                enable_custom_op, get_ascend_device_type,
                                get_weight_prefetch_method)
-from vllm_ascend.utils.tensor_dump import dump_mapping, dump_tensor
+from vllm_ascend.tensor_dump import dump_mapping, dump_tensor
 
 
 def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb):

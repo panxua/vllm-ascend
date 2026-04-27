@@ -52,7 +52,7 @@ from vllm_ascend.utils import (AscendDeviceType, enable_sp,
                                shared_experts_calculation_stream,
                                vllm_version_is, QuantType,
                                is_w8a8_dynamic)
-from vllm_ascend.utils.tensor_dump import dump_tensor
+from vllm_ascend.tensor_dump import dump_tensor
 
 
 @dataclass
