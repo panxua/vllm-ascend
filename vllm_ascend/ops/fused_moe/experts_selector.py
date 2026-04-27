@@ -24,7 +24,7 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.utils import split_tensor_along_first_dim
 
-from vllm_ascend.models.deepseek_v4 import _moe_dump_sub
+from vllm_ascend.models.deepseek_v4 import _dump_sub
 
 def select_experts(hidden_states: torch.Tensor,
                    router_logits: torch.Tensor,
@@ -248,8 +248,8 @@ def _select_expert_use_group_topk(
                                             sorted=False)
     topk_ids = topk_ids.to(torch.int32)
     topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
-    _moe_dump_sub(topk_weights, "output_weights", "gate_renormalize_topk_weights")
-    _moe_dump_sub(topk_ids, "output_topk_ids", "gate_renormalize_topk_weights")
+    _dump_sub(topk_weights, "output_weights", "gate_renormalize_topk_weights")
+    _dump_sub(topk_ids, "output_topk_ids", "gate_renormalize_topk_weights")
     return topk_weights, topk_ids
 
 
@@ -292,12 +292,12 @@ def _select_experts_with_fusion_ops(
                     input_ids, num_partitions=tp_size)
                 input_ids = splitted_input[tp_rank].contiguous()
             input_ids = torch.where(input_ids == -1, 0 ,input_ids)
-            _moe_dump_sub(input_ids, "input_router_logits", "gate_select_experts_native")
-            _moe_dump_sub(tid2eid_ones, "input_tid2eid", "gate_select_experts_native")
+            _dump_sub(input_ids, "input_router_logits", "gate_select_experts_native")
+            _dump_sub(tid2eid_ones, "input_tid2eid", "gate_select_experts_native")
         else:
             input_ids = None
             tid2eid_ones = None
-        _moe_dump_sub(router_logits, "input_router_logits", "gate_gating_top_k_hash")
+        _dump_sub(router_logits, "input_router_logits", "gate_gating_top_k_hash")
 
         _rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         if _rank == 0:
@@ -348,8 +348,8 @@ def _select_experts_with_fusion_ops(
             print(f"  {topk_ids}")
             print("=" * 80)
 
-        _moe_dump_sub(topk_weights, "output_topk_weights", "gate_gating_top_k_hash")
-        _moe_dump_sub(topk_ids, "output_topk_ids", "gate_gating_top_k_hash")
+        _dump_sub(topk_weights, "output_topk_weights", "gate_gating_top_k_hash")
+        _dump_sub(topk_ids, "output_topk_ids", "gate_gating_top_k_hash")
         return topk_weights, topk_ids
 
         scores = F.softplus(router_logits).sqrt()
@@ -444,7 +444,7 @@ def _native_select_experts(
         topk_weights = F.softplus(topk_weights).sqrt()
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
-    _moe_dump_sub(topk_weights, "output_weights", "gate_select_experts_native")
+    _dump_sub(topk_weights, "output_weights", "gate_select_experts_native")
 
     if use_grouped_topk:
         return _select_expert_use_group_topk(

@@ -34,65 +34,68 @@ import os
 import torch
 import torch_npu
 
-_DUMP_DIR = os.environ.get("MOE_DUMP_DIR", "/tmp/moe_dump")
-_DUMP_STEPS = set(int(x) for x in os.environ.get("MOE_DUMP_STEPS", "0").split(",") if x.strip())
-_DUMP_LAYERS = set(int(x) for x in os.environ.get("MOE_DUMP_LAYERS", "0").split(",") if x.strip())
+def _get_dump_env(name, default):
+    return os.environ.get(name, os.environ.get(name.replace("DUMP_", "MOE_DUMP_"), default))
+
+_DUMP_DIR = _get_dump_env("DUMP_DIR", "/tmp/moe_dump")
+_DUMP_STEPS = set(int(x) for x in _get_dump_env("DUMP_STEPS", "0").split(",") if x.strip())
+_DUMP_LAYERS = set(int(x) for x in _get_dump_env("DUMP_LAYERS", "0").split(",") if x.strip())
 _global_step_counter = -1
 _current_dump_layer = -1
 
 
-def _moe_dump_rank():
+def _dump_rank():
     if torch.distributed.is_initialized():
         return torch.distributed.get_rank()
     return 0
 
 
-def _moe_dump_step():
+def _dump_step():
     return _global_step_counter
 
 
-def _moe_dump_layer():
+def _dump_layer():
     return _current_dump_layer
 
 
-def _moe_dump_set_layer(layer_idx):
+def _dump_set_layer(layer_idx):
     global _current_dump_layer
     _current_dump_layer = layer_idx
 
 
-def _moe_dump_advance_step():
+def _dump_advance_step():
     global _global_step_counter
     _global_step_counter += 1
 
 
-def _moe_dump_should_dump(layer_idx):
+def _dump_should_dump(layer_idx):
     return _global_step_counter in _DUMP_STEPS and layer_idx in _DUMP_LAYERS
 
 
-def _moe_dump_base_dir(layer_idx=None):
+def _dump_base_dir(layer_idx=None):
     if layer_idx is None:
         layer_idx = _current_dump_layer
-    rank = _moe_dump_rank()
+    rank = _dump_rank()
     return os.path.join(
         _DUMP_DIR, f"step{_global_step_counter}", f"rank{rank}", f"layer{layer_idx}"
     )
 
 
-def _moe_dump_tensor(tensor, name, layer_idx):
-    if not _moe_dump_should_dump(layer_idx):
+def _dump_tensor(tensor, name, layer_idx):
+    if not _dump_should_dump(layer_idx):
         return
-    dump_dir = _moe_dump_base_dir(layer_idx)
+    dump_dir = _dump_base_dir(layer_idx)
     os.makedirs(dump_dir, exist_ok=True)
     if isinstance(tensor, torch.Tensor):
         torch.save(tensor.cpu(), os.path.join(dump_dir, f"{name}.pt"))
 
 
-def _moe_dump_sub(tensor, name, sub_path, layer_idx=None):
+def _dump_sub(tensor, name, sub_path, layer_idx=None):
     if layer_idx is None:
         layer_idx = _current_dump_layer
-    if not _moe_dump_should_dump(layer_idx):
+    if not _dump_should_dump(layer_idx):
         return
-    dump_dir = os.path.join(_moe_dump_base_dir(layer_idx), sub_path)
+    dump_dir = os.path.join(_dump_base_dir(layer_idx), sub_path)
     os.makedirs(dump_dir, exist_ok=True)
     if isinstance(tensor, torch.Tensor):
         torch.save(tensor.cpu(), os.path.join(dump_dir, f"{name}.pt"))
@@ -404,8 +407,8 @@ class DeepseekV4MoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        _moe_dump_set_layer(self.layer_idx)
-        _moe_dump_tensor(hidden_states, "moe_input_hidden_states", self.layer_idx)
+        _dump_set_layer(self.layer_idx)
+        _dump_tensor(hidden_states, "moe_input_hidden_states", self.layer_idx)
 
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
@@ -415,22 +418,22 @@ class DeepseekV4MoE(nn.Module):
                 hidden_states=hidden_states, router_logits=hidden_states
             )
         else:
-            _moe_dump_sub(hidden_states, "input_hidden_states", "gate_matmul")
+            _dump_sub(hidden_states, "input_hidden_states", "gate_matmul")
             router_logits = F.linear(hidden_states.float(), self.gate.weight)
-            _moe_dump_sub(router_logits, "output_router_logits", "gate_matmul")
-            _moe_dump_sub(self.gate.weight, "weight", "gate_matmul")
+            _dump_sub(router_logits, "output_router_logits", "gate_matmul")
+            _dump_sub(self.gate.weight, "weight", "gate_matmul")
             if self.gate.e_score_correction_bias is not None:
-                _moe_dump_sub(self.gate.e_score_correction_bias, "bias_e_score_correction", "gate_matmul")
+                _dump_sub(self.gate.e_score_correction_bias, "bias_e_score_correction", "gate_matmul")
             fused_moe_out = self.experts(
                 hidden_states=hidden_states, router_logits=router_logits
             )
 
         shared_output, final_hidden_states = fused_moe_out
-        _moe_dump_sub(hidden_states, "input_routed", "gate_final")
-        _moe_dump_sub(final_hidden_states, "output_routed", "gate_final")
+        _dump_sub(hidden_states, "input_routed", "gate_final")
+        _dump_sub(final_hidden_states, "output_routed", "gate_final")
         if shared_output is not None:
-            _moe_dump_sub(hidden_states, "input_shared", "gate_final")
-            _moe_dump_sub(shared_output, "output_shared", "gate_final")
+            _dump_sub(hidden_states, "input_shared", "gate_final")
+            _dump_sub(shared_output, "output_shared", "gate_final")
         if self.shared_experts is None:
             assert shared_output is None
 
@@ -445,7 +448,7 @@ class DeepseekV4MoE(nn.Module):
             assert shared_output is not None
             final_hidden_states = muls_add_triton(shared_output, final_hidden_states, 1.0 / self.routed_scaling_factor)
 
-        _moe_dump_tensor(final_hidden_states, "moe_final_output_before_allreduce", self.layer_idx)
+        _dump_tensor(final_hidden_states, "moe_final_output_before_allreduce", self.layer_idx)
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
@@ -812,23 +815,23 @@ class DeepseekV2DecoderLayer(nn.Module):
         
 
     def hc_pre(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
-        _moe_dump_sub(x, "input_hidden_states", "mhc_hc_pre")
-        _moe_dump_sub(hc_fn, "weight", "mhc_hc_pre")
-        _moe_dump_sub(hc_scale, "input_scale", "mhc_hc_pre")
-        _moe_dump_sub(hc_base, "input_base", "mhc_hc_pre")
+        _dump_sub(x, "input_hidden_states", "mhc_hc_pre")
+        _dump_sub(hc_fn, "weight", "mhc_hc_pre")
+        _dump_sub(hc_scale, "input_scale", "mhc_hc_pre")
+        _dump_sub(hc_base, "input_base", "mhc_hc_pre")
         y = torch.ops._C_ascend.npu_hc_pre(
             x, hc_fn, hc_scale, hc_base, self.hc_mult, self.hc_sinkhorn_iters, self.norm_eps, self.hc_eps)
-        _moe_dump_sub(y, "output", "mhc_hc_pre")
+        _dump_sub(y, "output", "mhc_hc_pre")
         return y
 
     def hc_post(self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor):
-        _moe_dump_sub(x, "input_hidden_states", "mhc_hc_post")
-        _moe_dump_sub(residual, "input_residual", "mhc_hc_post")
-        _moe_dump_sub(post, "input_post", "mhc_hc_post")
-        _moe_dump_sub(comb, "input_comb", "mhc_hc_post")
+        _dump_sub(x, "input_hidden_states", "mhc_hc_post")
+        _dump_sub(residual, "input_residual", "mhc_hc_post")
+        _dump_sub(post, "input_post", "mhc_hc_post")
+        _dump_sub(comb, "input_comb", "mhc_hc_post")
         y = torch.ops._C_ascend.npu_hc_post(
             x.unsqueeze(dim=0), residual.unsqueeze(dim=0), post.unsqueeze(dim=0), comb.unsqueeze(dim=0))
-        _moe_dump_sub(y, "output", "mhc_hc_post")
+        _dump_sub(y, "output", "mhc_hc_post")
         return y.squeeze(dim=0)
     
     def forward(
@@ -969,7 +972,7 @@ class DeepseekV4Model(nn.Module):
             hidden_states, residual = layer(
                 positions, hidden_states, residual, llama_4_scaling
             )
-        _moe_dump_advance_step()
+        _dump_advance_step()
         hidden_states = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(

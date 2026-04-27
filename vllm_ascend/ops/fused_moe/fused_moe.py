@@ -53,7 +53,7 @@ from vllm_ascend.utils import (AscendDeviceType, enable_sp,
                                vllm_version_is, QuantType,
                                is_w8a8_dynamic)
 
-from vllm_ascend.models.deepseek_v4 import _moe_dump_sub
+from vllm_ascend.models.deepseek_v4 import _dump_sub
 
 
 @dataclass
@@ -116,8 +116,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
         input_ids = get_forward_context().input_ids
-        _moe_dump_sub(x, "input_hidden_states", "ffn_select_experts")
-        _moe_dump_sub(router_logits, "input_router_logits", "ffn_select_experts")
+        _dump_sub(x, "input_hidden_states", "ffn_select_experts")
+        _dump_sub(router_logits, "input_router_logits", "ffn_select_experts")
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -134,8 +134,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             tid2eid=self.tid2eid,
             input_ids=input_ids
             )
-        _moe_dump_sub(topk_weights, "output_topk_weights", "ffn_moe_active_topk")
-        _moe_dump_sub(topk_ids, "output_topk_ids", "ffn_moe_active_topk")
+        _dump_sub(topk_weights, "output_topk_weights", "ffn_moe_active_topk")
+        _dump_sub(topk_ids, "output_topk_ids", "ffn_moe_active_topk")
 
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
@@ -147,8 +147,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             )
 
         topk_weights = topk_weights.to(x.dtype)
-        _moe_dump_sub(topk_weights, "input_topk_weights", "ffn_forward_expert")
-        _moe_dump_sub(topk_ids, "input_topk_ids", "ffn_forward_expert")
+        _dump_sub(topk_weights, "input_topk_weights", "ffn_forward_expert")
+        _dump_sub(topk_ids, "input_topk_ids", "ffn_forward_expert")
 
         if enable_force_load_balance:
             random_matrix = torch.rand(topk_ids.size(0),
@@ -158,9 +158,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 random_matrix, dim=1)[:, :topk_ids.size(1)].to(topk_ids.dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
-        _moe_dump_sub(x, "input_hidden_states", "ffn_forward_expert")
-        _moe_dump_sub(layer.w13_weight, "weight_w13", "ffn_gate_proj")
-        _moe_dump_sub(layer.w2_weight, "weight_w2", "ffn_gate_proj")
+        _dump_sub(x, "input_hidden_states", "ffn_forward_expert")
+        _dump_sub(layer.w13_weight, "weight_w13", "ffn_gate_proj")
+        _dump_sub(layer.w2_weight, "weight_w2", "ffn_gate_proj")
         final_hidden_states = moe_comm_method.fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
@@ -171,7 +171,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             apply_router_weight_on_input=apply_router_weight_on_input,
             dynamic_eplb=self.dynamic_eplb,
             mc2_mask=kwargs.get("mc2_mask", None))
-        _moe_dump_sub(final_hidden_states, "output", "ffn_moe_combine_result")
+        _dump_sub(final_hidden_states, "output", "ffn_moe_combine_result")
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result
         return final_hidden_states
@@ -376,8 +376,8 @@ class AscendFusedMoE(FusedMoE):
             replace_allreduce=forward_context.sp_enabled,
             enable_shared_expert_dp=self.enable_shared_expert_dp,
             quant_type=self.quant_type)
-        _moe_dump_sub(hidden_states, "output", "ffn_dp_gather")
-        _moe_dump_sub(router_logits, "output_router_logits", "ffn_dp_gather")
+        _dump_sub(hidden_states, "output", "ffn_dp_gather")
+        _dump_sub(router_logits, "output_router_logits", "ffn_dp_gather")
 
         # Make sure the default stream waits for the gate stream to finish.
         if self.multistream_overlap_gate:
@@ -425,7 +425,7 @@ class AscendFusedMoE(FusedMoE):
             hidden_states=fused_experts_results.routed_out,
             reduce_results=self.reduce_results,
             context_metadata=context_metadata)
-        _moe_dump_sub(routed_out, "output", "ffn_tp_reduce")
+        _dump_sub(routed_out, "output", "ffn_tp_reduce")
 
         if return_with_event:
             return FusedMoEResult(
@@ -588,12 +588,12 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             # dispatch communication.
             maybe_wait_event(fused_moe_evts.before_dispatch)
             part1_out = self._shared_experts_part1(hidden_states)
-            _moe_dump_sub(part1_out, "output_gate_up", "ffn_shared_experts")
+            _dump_sub(part1_out, "output_gate_up", "ffn_shared_experts")
             # Execute the down projection concurrently with the combine
             # communication.
             maybe_wait_event(fused_moe_evts.before_combine)
             shared_out = self._shared_experts_part2(hidden_states, part1_out)
-            _moe_dump_sub(shared_out, "output", "ffn_shared_expert_gate")
+            _dump_sub(shared_out, "output", "ffn_shared_expert_gate")
 
         # Make sure the default stream waits for the shared experts stream to
         # finish.
@@ -612,8 +612,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
 
     def forward_impl(  # type: ignore[override]
             self, hidden_states: torch.Tensor, router_logits: torch.Tensor):
-        _moe_dump_sub(hidden_states, "input_hidden_states", "ffn_forward")
-        _moe_dump_sub(router_logits, "input_router_logits", "ffn_forward")
+        _dump_sub(hidden_states, "input_hidden_states", "ffn_forward")
+        _dump_sub(router_logits, "input_router_logits", "ffn_forward")
 
         if self.multistream_overlap_gate:
             set_flash_common3_context(shared_experts=self._shared_experts)
@@ -628,7 +628,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         routed_out = fused_moe_results.routed_out
 
         if self._shared_experts is None:
-            _moe_dump_sub(routed_out, "output", "ffn_forward")
+            _dump_sub(routed_out, "output", "ffn_forward")
             return routed_out
         elif self.multistream_overlap_gate:
             fc3_context = get_flash_common3_context()
@@ -643,6 +643,6 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
                     before_combine=fused_moe_results.before_combine_evt,
                 ))
 
-        _moe_dump_sub(shared_out, "output", "ffn_forward")
-        _moe_dump_sub(shared_out, "output", "ffn_shared_experts")
+        _dump_sub(shared_out, "output", "ffn_forward")
+        _dump_sub(shared_out, "output", "ffn_shared_experts")
         return shared_out, routed_out
