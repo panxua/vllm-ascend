@@ -83,6 +83,15 @@ from vllm_ascend.ops.dsa import DSAModules,AscendDeepseekSparseAttention
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.utils.tensor_dump import (
+    dump_module_io as _dump_module_io,
+    dump_target_layer as _dump_target_layer,
+    dump_tensor as _dump_tensor,
+    reset_dump_layer as _reset_dump_layer,
+    reset_dump_step as _reset_dump_step,
+    set_dump_layer as _set_dump_layer,
+    set_dump_step as _set_dump_step,
+)
 
 logger = init_logger(__name__)
 
@@ -216,9 +225,13 @@ class DeepseekV2MLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
+        _dump_tensor("ffn/shared_experts/gate_up_proj", "input", x)
         gate_up, _ = self.gate_up_proj(x)
+        _dump_tensor("ffn/shared_experts/gate_up_proj", "output", gate_up)
         x = self.act_fn(gate_up)
+        _dump_tensor("ffn/shared_experts/activation", "output", x)
         x, _ = self.down_proj(x)
+        _dump_tensor("ffn/shared_experts/down_proj", "output", x)
         return x
 
 
@@ -337,8 +350,17 @@ class DeepseekV4MoE(nn.Module):
         
     def forward(self, hidden_states: torch.Tensor,input_ids = None) -> torch.Tensor:
 
+        _dump_tensor("gate", "input", hidden_states, layer_idx=self.layer_idx)
+        if input_ids is not None:
+            _dump_tensor("gate", "input_ids", input_ids, layer_idx=self.layer_idx)
+        _dump_tensor("ffn", "input", hidden_states, layer_idx=self.layer_idx)
+        _dump_tensor("ffn/forward_with_selected_experts", "input_hidden_states",
+                     hidden_states, layer_idx=self.layer_idx)
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+        _dump_tensor("ffn/forward_with_selected_experts",
+                     "input_hidden_states_flattened", hidden_states,
+                     layer_idx=self.layer_idx)
 
         # Chunk the hidden states so they aren't replicated across TP ranks.
         # This avoids duplicate computation in self.experts.
@@ -346,20 +368,37 @@ class DeepseekV4MoE(nn.Module):
         # reduce_scatter instead of chunking here.
         if self.is_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
+            _dump_tensor("ffn/forward_with_selected_experts",
+                         "input_hidden_states_chunked", hidden_states,
+                         layer_idx=self.layer_idx)
 
         if self.experts.is_internal_router:
             # In this case, the gate/router runs inside the FusedMoE class
+            _dump_tensor("ffn/forward_expert", "input_router_logits",
+                         hidden_states, layer_idx=self.layer_idx)
             fused_moe_out = self.experts(
                 hidden_states=hidden_states, router_logits=hidden_states
             )
         else:
             # router_logits: (num_tokens, n_experts)
+            _dump_tensor("gate/matmul", "input_hidden_states", hidden_states,
+                         layer_idx=self.layer_idx)
+            _dump_tensor("gate/matmul", "input_weight", self.gate.weight,
+                         layer_idx=self.layer_idx)
             router_logits = F.linear(hidden_states.float(), self.gate.weight)
+            _dump_tensor("gate/matmul", "output_logits", router_logits,
+                         layer_idx=self.layer_idx)
+            _dump_tensor("ffn/forward_expert", "input_router_logits",
+                         router_logits, layer_idx=self.layer_idx)
             fused_moe_out = self.experts(
                 hidden_states=hidden_states, router_logits=router_logits
             )
 
         shared_output, final_hidden_states = fused_moe_out
+        _dump_tensor("ffn/shared_experts", "output_raw", shared_output,
+                     layer_idx=self.layer_idx)
+        _dump_tensor("ffn/forward_expert", "output_reshaped",
+                     final_hidden_states, layer_idx=self.layer_idx)
         if self.shared_experts is None:
             assert shared_output is None
 
@@ -381,12 +420,23 @@ class DeepseekV4MoE(nn.Module):
                 final_hidden_states, 0
             )
             final_hidden_states = final_hidden_states[:num_tokens]
+            _dump_tensor("ffn/forward_with_selected_experts",
+                         "output_all_gathered", final_hidden_states,
+                         layer_idx=self.layer_idx)
         elif self.tp_size > 1:
             final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
                 final_hidden_states
             )
+            _dump_tensor("ffn/forward_with_selected_experts",
+                         "output_all_reduced", final_hidden_states,
+                         layer_idx=self.layer_idx)
 
-        return final_hidden_states.view(num_tokens, hidden_dim)
+        final_hidden_states = final_hidden_states.view(num_tokens, hidden_dim)
+        _dump_tensor("ffn/forward_with_selected_experts", "output",
+                     final_hidden_states, layer_idx=self.layer_idx)
+        _dump_tensor("ffn", "output", final_hidden_states,
+                     layer_idx=self.layer_idx)
+        return final_hidden_states
     
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
@@ -646,6 +696,17 @@ class DeepseekV4Attention(nn.Module):
             compressor = self.compressor,
             topk_indices_buffer=topk_indices_buffer,
         )
+        _dump_module_io(self.wq_a, "attention/q_a_proj")
+        _dump_module_io(self.q_norm, "attention/q_a_layernorm")
+        _dump_module_io(self.wq_b, "attention/q_b_proj")
+        _dump_module_io(self.wkv, "attention/kv_proj")
+        _dump_module_io(self.kv_norm, "attention/kv_layernorm")
+        _dump_module_io(self.wo_a, "attention/o_a_proj")
+        _dump_module_io(self.wo_b, "attention/o_b_proj")
+        if self.indexer is not None:
+            _dump_module_io(self.indexer, "attention/indexer")
+        if self.compressor is not None:
+            _dump_module_io(self.compressor, "attention/compressor")
 
         self.dsa_attn = AscendDeepseekSparseAttention(
             dim=self.dim,
@@ -675,7 +736,16 @@ class DeepseekV4Attention(nn.Module):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None,
     ) -> torch.Tensor:
-        return self.dsa_attn(positions, hidden_states, llama_4_scaling)
+        _dump_tensor("attention/ds_attention", "input_positions", positions,
+                     layer_idx=self.layer_idx)
+        _dump_tensor("attention/ds_attention", "input_hidden_states",
+                     hidden_states, layer_idx=self.layer_idx)
+        _dump_tensor("attention/ds_attention", "input_llama_4_scaling",
+                     llama_4_scaling, layer_idx=self.layer_idx)
+        output = self.dsa_attn(positions, hidden_states, llama_4_scaling)
+        _dump_tensor("attention/ds_attention", "output", output,
+                     layer_idx=self.layer_idx)
+        return output
 
 
 class DeepseekV2DecoderLayer(nn.Module):
@@ -757,21 +827,69 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         llama_4_scaling: torch.Tensor | None = None
     ) -> torch.Tensor:
+        layer_token = _set_dump_layer(self.layer_idx)
+        try:
+            return self._forward_impl(
+                positions, hidden_states, residual, llama_4_scaling)
+        finally:
+            _reset_dump_layer(layer_token)
+
+    def _forward_impl(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        llama_4_scaling: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        _dump_tensor("layer", "input", hidden_states)
+        _dump_tensor("layer", "positions", positions)
+        _dump_tensor("layer", "residual", residual)
         residual = hidden_states.clone()
+        _dump_tensor("attn_hc_pre", "input_x", hidden_states)
+        _dump_tensor("attn_hc_pre", "input_hc_fn", self.hc_attn_fn)
+        _dump_tensor("attn_hc_pre", "input_hc_scale", self.hc_attn_scale)
+        _dump_tensor("attn_hc_pre", "input_hc_base", self.hc_attn_base)
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
+        _dump_tensor("attn_hc_pre", "output_x", hidden_states)
+        _dump_tensor("attn_hc_pre", "output_post", post)
+        _dump_tensor("attn_hc_pre", "output_comb", comb)
+        _dump_tensor("attn_norm", "input", hidden_states)
         hidden_states = self.input_layernorm(hidden_states)
+        _dump_tensor("attn_norm", "output", hidden_states)
+        _dump_tensor("attention", "input", hidden_states)
         attn_kwargs = {
             "positions": positions,
             "hidden_states": hidden_states,
             "llama_4_scaling": llama_4_scaling
         }
         hidden_states = self.self_attn(**attn_kwargs)
+        _dump_tensor("attention", "output", hidden_states)
+        _dump_tensor("attn_hc_post", "input_x", hidden_states)
+        _dump_tensor("attn_hc_post", "input_residual", residual)
+        _dump_tensor("attn_hc_post", "input_post", post)
+        _dump_tensor("attn_hc_post", "input_comb", comb)
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
+        _dump_tensor("attn_hc_post", "output", hidden_states)
         residual = hidden_states.clone()
+        _dump_tensor("ffn_hc_pre", "input_x", hidden_states)
+        _dump_tensor("ffn_hc_pre", "input_hc_fn", self.hc_ffn_fn)
+        _dump_tensor("ffn_hc_pre", "input_hc_scale", self.hc_ffn_scale)
+        _dump_tensor("ffn_hc_pre", "input_hc_base", self.hc_ffn_base)
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
+        _dump_tensor("ffn_hc_pre", "output_x", hidden_states)
+        _dump_tensor("ffn_hc_pre", "output_post", post)
+        _dump_tensor("ffn_hc_pre", "output_comb", comb)
+        _dump_tensor("ffn_norm", "input", hidden_states)
         hidden_states = self.post_attention_layernorm(hidden_states)
+        _dump_tensor("ffn_norm", "output", hidden_states)
         hidden_states = self.mlp(hidden_states)
+        _dump_tensor("ffn_hc_post", "input_x", hidden_states)
+        _dump_tensor("ffn_hc_post", "input_residual", residual)
+        _dump_tensor("ffn_hc_post", "input_post", post)
+        _dump_tensor("ffn_hc_post", "input_comb", comb)
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
+        _dump_tensor("ffn_hc_post", "output", hidden_states)
+        _dump_tensor("layer", "output", hidden_states)
 
         return hidden_states, residual
 
@@ -834,6 +952,7 @@ class DeepseekV4Model(nn.Module):
         self.hc_head_fn = nn.Parameter(torch.empty(hc_mult, hc_dim,dtype = torch.float32))
         self.hc_head_base = nn.Parameter(torch.empty(hc_mult,dtype = torch.float32))
         self.hc_head_scale = nn.Parameter(torch.empty(1,dtype = torch.float32))
+        self._dump_forward_step = 0
         
         
 
@@ -858,11 +977,31 @@ class DeepseekV4Model(nn.Module):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        dump_step = self._dump_forward_step
+        self._dump_forward_step += 1
+        dump_step_token = _set_dump_step(dump_step)
+        try:
+            return self._forward_impl(
+                input_ids, positions, intermediate_tensors, inputs_embeds)
+        finally:
+            _reset_dump_step(dump_step_token)
+
+    def _forward_impl(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
+                _dump_tensor("model/embed_tokens", "input_ids", input_ids,
+                             layer_idx=_dump_target_layer())
                 hidden_states = self.embed_input_ids(input_ids)
+                _dump_tensor("model/embed_tokens", "output", hidden_states,
+                             layer_idx=_dump_target_layer())
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -883,18 +1022,36 @@ class DeepseekV4Model(nn.Module):
         else:
             llama_4_scaling = None
 
+        _dump_tensor("model/hc_head", "input_before_repeat", hidden_states,
+                     layer_idx=_dump_target_layer())
         hidden_states = hidden_states.unsqueeze(1).repeat( 1, self.hc_mult, 1) #(b,s, c, h)
+        _dump_tensor("model/hc_head", "output_repeat", hidden_states,
+                     layer_idx=_dump_target_layer())
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions, hidden_states, residual, llama_4_scaling
             )
+        _dump_tensor("model/hc_head", "input_x", hidden_states,
+                     layer_idx=_dump_target_layer())
+        _dump_tensor("model/hc_head", "input_hc_fn", self.hc_head_fn,
+                     layer_idx=_dump_target_layer())
+        _dump_tensor("model/hc_head", "input_hc_scale", self.hc_head_scale,
+                     layer_idx=_dump_target_layer())
+        _dump_tensor("model/hc_head", "input_hc_base", self.hc_head_base,
+                     layer_idx=_dump_target_layer())
         hidden_states = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
+        _dump_tensor("model/hc_head", "output", hidden_states,
+                     layer_idx=_dump_target_layer())
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
+        _dump_tensor("model/norm", "input", hidden_states,
+                     layer_idx=_dump_target_layer())
         hidden_states = self.norm(hidden_states)
+        _dump_tensor("model/norm", "output", hidden_states,
+                     layer_idx=_dump_target_layer())
         return hidden_states
 
 

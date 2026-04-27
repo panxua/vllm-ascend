@@ -26,6 +26,7 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import (AscendDeviceType, dispose_tensor,
                                enable_custom_op, get_ascend_device_type,
                                get_weight_prefetch_method)
+from vllm_ascend.utils.tensor_dump import dump_mapping, dump_tensor
 
 
 def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb):
@@ -82,6 +83,13 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                     w2_offset: Optional[torch.Tensor] = None,
                     fusion: bool = False,
                     dynamic_eplb: bool = False) -> torch.Tensor:
+    dump_tensor("ffn/quant_apply_mlp", "input_hidden_states", hidden_states)
+    dump_mapping("ffn/quant_apply_mlp", "input_w1", w1)
+    dump_mapping("ffn/quant_apply_mlp", "input_w1_scale", w1_scale)
+    dump_mapping("ffn/quant_apply_mlp", "input_w2", w2)
+    dump_mapping("ffn/quant_apply_mlp", "input_w2_scale", w2_scale)
+    dump_tensor("ffn/quant_apply_mlp", "input_group_list", group_list)
+    dump_tensor("ffn/quant_apply_mlp", "input_dynamic_scale", dynamic_scale)
     if w1_offset is not None:
         unquantized_hidden_states = hidden_states
         quantized_hidden_states = None
@@ -89,6 +97,10 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
         unquantized_hidden_states = hidden_states
         hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
             hidden_states)
+        dump_tensor("ffn/quant_apply_mlp", "output_dynamic_quant",
+                    hidden_states)
+        dump_tensor("ffn/quant_apply_mlp", "output_pertoken_scale",
+                    pertoken_scale)
         # Dispose the original unquantized hidden states
         # to save npu memory because they're no longer used.
         dispose_tensor(unquantized_hidden_states)
@@ -119,6 +131,9 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                     group_list=cumsum_group_list(group_list, group_list_type,
                                                  0),
                 ))
+            dump_tensor("ffn/group_gemm1", "output", hidden_states)
+            dump_tensor("ffn/activation", "output_scale",
+                        swiglu_out_scale)
         elif fusion and not dynamic_eplb:
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = torch_npu.npu_grouped_matmul_swiglu_quant(
@@ -127,6 +142,9 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 group_list=cumsum_group_list(group_list, group_list_type, 0),
                 weight_scale=w1_scale[0],
                 x_scale=pertoken_scale)
+            dump_tensor("ffn/group_gemm1", "output", hidden_states)
+            dump_tensor("ffn/activation", "output_scale",
+                        swiglu_out_scale)
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
         else:
@@ -141,6 +159,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 group_type=0,
                 group_list=group_list,
                 output_dtype=torch.int32)[0]
+            dump_tensor("ffn/group_gemm1", "output", hidden_states)
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
             # act_fn: swiglu
@@ -155,6 +174,9 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 activate_left=True,
                 quant_mode=1,
             )
+            dump_tensor("ffn/activation", "output", hidden_states)
+            dump_tensor("ffn/activation", "output_scale",
+                        swiglu_out_scale)
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
@@ -166,6 +188,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             group_type=0,
             group_list=group_list,
             output_dtype=w2_scale[0].dtype)[0]
+        dump_tensor("ffn/group_gemm2", "output", hidden_states)
     elif w1_offset is not None:
         # gmm1: gate_up_proj
         hidden_states = torch_npu.npu_grouped_matmul(
@@ -178,9 +201,11 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             group_type=0,
             group_list=group_list,
             output_dtype=_output_dtype)[0]
+        dump_tensor("ffn/group_gemm1", "output", hidden_states)
         dispose_tensor(unquantized_hidden_states)
         # act_fn: swiglu
         hidden_states = torch_npu.npu_swiglu(hidden_states)
+        dump_tensor("ffn/activation", "output", hidden_states)
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
@@ -192,6 +217,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             group_type=0,
             group_list=group_list,
             output_dtype=_output_dtype)[0]
+        dump_tensor("ffn/group_gemm2", "output", hidden_states)
     else:
         if w1_scale_bias is not None:
             if group_list_type == 0:
@@ -217,6 +243,9 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                                                  0),
                     bias=bias1,
                 ))
+            dump_tensor("ffn/group_gemm1", "output", hidden_states)
+            dump_tensor("ffn/activation", "output_scale",
+                        swiglu_out_scale)
         elif fusion and not dynamic_eplb:
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = torch_npu.npu_grouped_matmul_swiglu_quant(
@@ -226,6 +255,9 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 group_list=cumsum_group_list(group_list, group_list_type, 0),
                 weight_scale=w1_scale[0],
                 x_scale=pertoken_scale)
+            dump_tensor("ffn/group_gemm1", "output", hidden_states)
+            dump_tensor("ffn/activation", "output_scale",
+                        swiglu_out_scale)
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
         else:
@@ -242,6 +274,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 group_type=0,
                 group_list=group_list,
                 output_dtype=_output_dtype)[0]
+            dump_tensor("ffn/group_gemm1", "output", hidden_states)
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
             # act_fn: swiglu
@@ -256,6 +289,9 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 hidden_states = torch_npu.npu_swiglu(hidden_states)
                 hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(
                     hidden_states)
+            dump_tensor("ffn/activation", "output", hidden_states)
+            dump_tensor("ffn/activation", "output_scale",
+                        swiglu_out_scale)
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
@@ -268,6 +304,8 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             group_type=0,
             group_list=group_list,
             output_dtype=_output_dtype)[0]
+        dump_tensor("ffn/group_gemm2", "output", hidden_states)
+    dump_tensor("ffn/quant_apply_mlp", "output", hidden_states)
     return hidden_states
 
 
@@ -279,9 +317,18 @@ def unquant_apply_mlp(hidden_states: torch.Tensor,
                       topk_scales: Optional[torch.Tensor] = None,
                       need_trans: bool = True) -> torch.Tensor:
 
+    dump_tensor("ffn/unquant_apply_mlp", "input_hidden_states",
+                hidden_states)
+    dump_tensor("ffn/unquant_apply_mlp", "input_w1", w1)
+    dump_tensor("ffn/unquant_apply_mlp", "input_w2", w2)
+    dump_tensor("ffn/unquant_apply_mlp", "input_group_list", group_list)
+    dump_tensor("ffn/unquant_apply_mlp", "input_topk_scales",
+                topk_scales)
     if need_trans:
         w1 = w1.transpose(1, 2)
         w2 = w2.transpose(1, 2)
+        dump_tensor("ffn/unquant_apply_mlp", "input_w1_transposed", w1)
+        dump_tensor("ffn/unquant_apply_mlp", "input_w2_transposed", w2)
 
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
@@ -291,14 +338,17 @@ def unquant_apply_mlp(hidden_states: torch.Tensor,
         group_type=0,
         group_list=group_list,
     )[0]
+    dump_tensor("ffn/group_gemm1", "output", gate_up_out)
     if get_ascend_device_type() == AscendDeviceType._310P:
         gate_up_out = torch_npu.npu_swiglu(gate_up_out.to(torch.float32)).to(
             torch.float16)
     else:
         gate_up_out = torch_npu.npu_swiglu(gate_up_out)
+    dump_tensor("ffn/activation", "output", gate_up_out)
 
     if topk_scales is not None:
         gate_up_out *= topk_scales
+        dump_tensor("ffn/activation", "output_scaled", gate_up_out)
 
     hidden_states = torch_npu.npu_grouped_matmul(
         x=[gate_up_out],
@@ -308,6 +358,8 @@ def unquant_apply_mlp(hidden_states: torch.Tensor,
         group_type=0,
         group_list=group_list,
     )[0]
+    dump_tensor("ffn/group_gemm2", "output", hidden_states)
+    dump_tensor("ffn/unquant_apply_mlp", "output", hidden_states)
     return hidden_states
 
 
@@ -328,27 +380,34 @@ def unified_apply_mlp(hidden_states: torch.Tensor,
                       fusion: bool = False,
                       need_trans: bool = True,
                       dynamic_eplb: bool = False) -> torch.Tensor:
+    dump_tensor("ffn/unified_apply_mlp", "input_hidden_states",
+                hidden_states)
+    dump_mapping("ffn/unified_apply_mlp", "input_w1", w1)
+    dump_mapping("ffn/unified_apply_mlp", "input_w2", w2)
+    dump_tensor("ffn/unified_apply_mlp", "input_group_list", group_list)
     if with_quant:
         assert w1_scale is not None and w2_scale is not None
-        return quant_apply_mlp(hidden_states=hidden_states,
-                               w1=w1,
-                               w1_scale=w1_scale,
-                               w2=w2,
-                               w2_scale=w2_scale,
-                               group_list=group_list,
-                               dynamic_scale=dynamic_scale,
-                               group_list_type=group_list_type,
-                               w1_scale_bias=w1_scale_bias,
-                               w2_scale_bias=w2_scale_bias,
-                               w1_offset=w1_offset,
-                               w2_offset=w2_offset,
-                               fusion=fusion,
-                               dynamic_eplb=dynamic_eplb)
-    else:
-        return unquant_apply_mlp(hidden_states=hidden_states,
+        output = quant_apply_mlp(hidden_states=hidden_states,
                                  w1=w1,
+                                 w1_scale=w1_scale,
                                  w2=w2,
+                                 w2_scale=w2_scale,
                                  group_list=group_list,
+                                 dynamic_scale=dynamic_scale,
                                  group_list_type=group_list_type,
-                                 topk_scales=topk_scales,
-                                 need_trans=need_trans)
+                                 w1_scale_bias=w1_scale_bias,
+                                 w2_scale_bias=w2_scale_bias,
+                                 w1_offset=w1_offset,
+                                 w2_offset=w2_offset,
+                                 fusion=fusion,
+                                 dynamic_eplb=dynamic_eplb)
+    else:
+        output = unquant_apply_mlp(hidden_states=hidden_states,
+                                   w1=w1,
+                                   w2=w2,
+                                   group_list=group_list,
+                                   group_list_type=group_list_type,
+                                   topk_scales=topk_scales,
+                                   need_trans=need_trans)
+    dump_tensor("ffn/unified_apply_mlp", "output", output)
+    return output

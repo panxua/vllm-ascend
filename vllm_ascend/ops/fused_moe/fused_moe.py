@@ -52,6 +52,7 @@ from vllm_ascend.utils import (AscendDeviceType, enable_sp,
                                shared_experts_calculation_stream,
                                vllm_version_is, QuantType,
                                is_w8a8_dynamic)
+from vllm_ascend.utils.tensor_dump import dump_tensor
 
 
 @dataclass
@@ -111,6 +112,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
               enable_force_load_balance: bool = False,
             #   tid2eid = None,
               **kwargs) -> torch.Tensor:
+        dump_tensor("ffn/forward_expert", "input_hidden_states", x)
+        dump_tensor("ffn/forward_expert", "input_router_logits",
+                    router_logits)
+        dump_tensor("ffn/forward_expert", "input_w1", layer.w13_weight)
+        dump_tensor("ffn/forward_expert", "input_w2", layer.w2_weight)
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
         input_ids = get_forward_context().input_ids
@@ -131,6 +137,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             input_ids=input_ids
             )
 
+        dump_tensor("gate", "output_topk_weights", topk_weights)
+        dump_tensor("gate", "output_topk_ids", topk_ids)
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
                 expert_indices=topk_ids,
@@ -139,8 +147,15 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 zero_expert_type=zero_expert_type,
                 hidden_states=x,
             )
+            dump_tensor("ffn/zero_experts", "output_topk_ids", topk_ids)
+            dump_tensor("ffn/zero_experts", "output_topk_weights",
+                        topk_weights)
+            dump_tensor("ffn/zero_experts", "output", zero_expert_result)
 
         topk_weights = topk_weights.to(x.dtype)
+        dump_tensor("ffn/forward_expert", "input_topk_weights",
+                    topk_weights)
+        dump_tensor("ffn/forward_expert", "input_topk_ids", topk_ids)
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
@@ -150,6 +165,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                                        device=topk_ids.device)
             topk_ids = torch.argsort(
                 random_matrix, dim=1)[:, :topk_ids.size(1)].to(topk_ids.dtype)
+            dump_tensor("ffn/forward_expert", "force_lb_topk_ids",
+                        topk_ids)
 
         moe_comm_method = get_forward_context().moe_comm_method
         final_hidden_states = moe_comm_method.fused_experts(
@@ -162,8 +179,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             apply_router_weight_on_input=apply_router_weight_on_input,
             dynamic_eplb=self.dynamic_eplb,
             mc2_mask=kwargs.get("mc2_mask", None))
+        dump_tensor("ffn/forward_expert", "output", final_hidden_states)
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result
+            dump_tensor("ffn/forward_expert", "output_with_zero_expert",
+                        final_hidden_states)
         return final_hidden_states
 
 
@@ -309,6 +329,10 @@ class AscendFusedMoE(FusedMoE):
         assert self.quant_method is not None
 
         forward_context = get_forward_context()
+        dump_tensor("ffn/ascend_fused_moe", "input_hidden_states",
+                    hidden_states)
+        dump_tensor("ffn/ascend_fused_moe", "input_router_logits",
+                    router_logits)
 
         # Load balancing for token distribution among experts in dummy_run
         # TODO: The community only considers load balancing when DP > 1.
@@ -326,6 +350,8 @@ class AscendFusedMoE(FusedMoE):
                 # share_expert
                 assert fc3_context.shared_experts is not None
                 shared_out = fc3_context.shared_experts(hidden_states)
+                dump_tensor("ffn/shared_experts", "output_overlap_raw",
+                            shared_out)
                 # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
                 moe_comm_type = forward_context.moe_comm_type
                 if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2} \
@@ -349,6 +375,9 @@ class AscendFusedMoE(FusedMoE):
                     input_ids=input_ids,  # Note: get ids from forward context
                     tid2eid=self.tid2eid, # 
                     )
+                dump_tensor("gate", "output_topk_weights_overlap",
+                            topk_weights)
+                dump_tensor("gate", "output_topk_ids_overlap", topk_ids)
 
                 if isinstance(forward_context.moe_comm_method,
                               AllGatherCommImpl):
@@ -356,6 +385,10 @@ class AscendFusedMoE(FusedMoE):
                         topk_weights, True, True)
                     topk_ids = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                         topk_ids, True, True)
+                    dump_tensor("gate", "output_topk_weights_overlap_gathered",
+                                topk_weights)
+                    dump_tensor("gate", "output_topk_ids_overlap_gathered",
+                                topk_ids)
 
                 set_flash_common3_context(topk_weights=topk_weights,
                                           topk_ids=topk_ids)
@@ -366,6 +399,14 @@ class AscendFusedMoE(FusedMoE):
             replace_allreduce=forward_context.sp_enabled,
             enable_shared_expert_dp=self.enable_shared_expert_dp,
             quant_type=self.quant_type)
+        dump_tensor("ffn/prepare", "output_hidden_states",
+                    hidden_states[0] if isinstance(hidden_states, tuple)
+                    else hidden_states)
+        dump_tensor("ffn/prepare", "output_pertoken_scale",
+                    hidden_states[1] if isinstance(hidden_states, tuple)
+                    else None)
+        dump_tensor("ffn/prepare", "output_router_logits", router_logits)
+        dump_tensor("ffn/prepare", "output_mc2_mask", mc2_mask)
 
         # Make sure the default stream waits for the gate stream to finish.
         if self.multistream_overlap_gate:
@@ -399,6 +440,8 @@ class AscendFusedMoE(FusedMoE):
             log2phy=self.log2phy,
             global_redundant_expert_num=self.global_redundant_expert_num,
             mc2_mask=mc2_mask)
+        dump_tensor("ffn/ascend_fused_moe", "routed_out_before_finalize",
+                    fused_experts_results.routed_out)
 
         if self.dynamic_eplb:
             expert_tokens = fused_experts_results.expert_tokens
@@ -413,6 +456,7 @@ class AscendFusedMoE(FusedMoE):
             hidden_states=fused_experts_results.routed_out,
             reduce_results=self.reduce_results,
             context_metadata=context_metadata)
+        dump_tensor("ffn/ascend_fused_moe", "output", routed_out)
 
         if return_with_event:
             return FusedMoEResult(
@@ -471,14 +515,20 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
     def _shared_experts_part1(self, hidden_states: torch.Tensor):
         shared_gate_up, _ = self._shared_experts.gate_up_proj(
             hidden_states)  # type: ignore
+        dump_tensor("ffn/shared_experts/gate_up_proj", "output_part1",
+                    shared_gate_up)
         return shared_gate_up
 
     def _shared_experts_part2(self, hidden_states: torch.Tensor,
                               shared_gate_up: torch.Tensor):
         shared_act = self._shared_experts.act_fn(
             shared_gate_up)  # type: ignore
+        dump_tensor("ffn/shared_experts/activation", "output_part2",
+                    shared_act)
         shared_out, _ = self._shared_experts.down_proj(
             shared_act)  # type: ignore
+        dump_tensor("ffn/shared_experts/down_proj", "output_part2",
+                    shared_out)
 
         # Qwen3-Next specific gating mechanism
         if hasattr(self._shared_experts, "expert_gate") and \
@@ -492,6 +542,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
                 gate_out, _ = self._shared_experts.expert_gate(
                     hidden_states)  # type: ignore
             shared_out = F.sigmoid(gate_out) * shared_out
+            dump_tensor("ffn/shared_expert_gate", "output", gate_out)
+            dump_tensor("ffn/shared_experts", "output_gated", shared_out)
         return shared_out
 
     def _validate_shared_expert_consistency(self):
@@ -579,6 +631,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             # communication.
             maybe_wait_event(fused_moe_evts.before_combine)
             shared_out = self._shared_experts_part2(hidden_states, part1_out)
+            dump_tensor("ffn/shared_experts", "output_split_raw",
+                        shared_out)
 
         # Make sure the default stream waits for the shared experts stream to
         # finish.
@@ -593,6 +647,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2} \
                 and not shared_expert_dp_enabled():
             shared_out = tensor_model_parallel_all_reduce(shared_out)
+            dump_tensor("ffn/shared_experts", "output_all_reduced",
+                        shared_out)
         return shared_out
 
     def forward_impl(  # type: ignore[override]
@@ -608,6 +664,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             return_with_event=True,
         )
         routed_out = fused_moe_results.routed_out
+        dump_tensor("ffn/ascend_shared_fused_moe", "routed_out", routed_out)
 
         if self._shared_experts is None:
             return routed_out
@@ -623,5 +680,6 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
                     before_dispatch=fused_moe_results.before_dispatch_evt,
                     before_combine=fused_moe_results.before_combine_evt,
                 ))
+        dump_tensor("ffn/ascend_shared_fused_moe", "shared_out", shared_out)
 
         return shared_out, routed_out

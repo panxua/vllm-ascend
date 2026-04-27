@@ -34,6 +34,7 @@ from vllm_ascend.ops.fused_moe.comm_utils import (
     async_all_to_all, gather_from_sequence_parallel_region)
 from vllm_ascend.utils import (AscendDeviceType, get_ascend_device_type,
                                is_hierarchical_communication_enabled)
+from vllm_ascend.utils.tensor_dump import dump_mapping, dump_tensor
 
 
 @dataclass
@@ -192,6 +193,15 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                        with_quant: bool = False,
                        dynamic_eplb: bool = False,
                        pertoken_scale: Optional[torch.Tensor] = None):
+        dump_tensor("ffn/moe_init_routing_v2", "input_hidden_states",
+                    hidden_states)
+        dump_tensor("ffn/moe_init_routing_v2", "input_topk_weights",
+                    topk_weights)
+        dump_tensor("ffn/moe_init_routing_v2", "input_topk_ids", topk_ids)
+        dump_tensor("ffn/moe_init_routing_v2", "input_expert_map",
+                    expert_map)
+        dump_tensor("ffn/moe_init_routing_v2", "input_pertoken_scale",
+                    pertoken_scale)
         self.with_quant = with_quant
 
         kwargs_mc2 = self.get_dispatch_mc2_kwargs(hidden_states, topk_weights,
@@ -322,10 +332,15 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             ), "Only support topk=1 when `apply_router_weight_on_input` is True"
             hidden_states = hidden_states * \
                 topk_weights.to(hidden_states.dtype)
+            dump_tensor("ffn/moe_init_routing_v2",
+                        "hidden_states_router_weighted", hidden_states)
         if expert_map is not None:
             global_num_experts = len(expert_map) + global_redundant_expert_num
             mask = (expert_map[topk_ids] != -1)
             topk_weights = topk_weights * mask
+            dump_tensor("ffn/moe_init_routing_v2", "expert_map_mask", mask)
+            dump_tensor("ffn/moe_init_routing_v2",
+                        "topk_weights_after_expert_map", topk_weights)
             first_expert_idx = get_ep_group(
             ).rank_in_group * self.num_experts_local
             last_expert_idx = first_expert_idx + self.num_experts_local
@@ -348,6 +363,14 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
                 if self.with_quant and pertoken_scale is None else -1,
             ))
         expert_tokens = expert_tokens.to(torch.int64)
+        dump_tensor("ffn/moe_init_routing_v2", "output_sorted_hidden_states",
+                    sorted_hidden_states)
+        dump_tensor("ffn/moe_init_routing_v2", "output_expanded_row_idx",
+                    expanded_row_idx)
+        dump_tensor("ffn/moe_init_routing_v2", "output_expert_tokens",
+                    expert_tokens)
+        dump_tensor("ffn/moe_init_routing_v2", "output_pertoken_scale",
+                    pertoken_scale)
         group_list_type = 1  # `count` mode
         context_metadata = {
             "topk_weights": topk_weights,
@@ -364,12 +387,18 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
 
     def token_combine(self, hidden_states, context_metadata, bias=None):
         assert self.original_shape is not None
+        dump_tensor("ffn/moe_token_unpermute", "input_hidden_states",
+                    hidden_states)
+        dump_mapping("ffn/moe_token_unpermute", "input_context",
+                     context_metadata)
         final_hidden_states = torch_npu.npu_moe_token_unpermute(
             permuted_tokens=hidden_states,
             sorted_indices=torch.abs(context_metadata["expanded_row_idx"]),
             probs=context_metadata["topk_weights"])
         if len(self.original_shape) == 3:
             final_hidden_states = final_hidden_states.view(self.original_shape)
+        dump_tensor("ffn/moe_token_unpermute", "output",
+                    final_hidden_states)
 
         # these values are no longer used, so they need to be set to None for memory release.
         return TokenCombineResult(routed_out=final_hidden_states)
@@ -427,6 +456,12 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
                        with_quant: bool = False,
                        dynamic_eplb: bool = False,
                        pertoken_scale: Optional[torch.Tensor] = None):
+        dump_tensor("ffn/token_dispatch_all2allv", "input_hidden_states",
+                    hidden_states)
+        dump_tensor("ffn/token_dispatch_all2allv", "input_topk_weights",
+                    topk_weights)
+        dump_tensor("ffn/token_dispatch_all2allv", "input_topk_ids",
+                    topk_ids)
         self.with_quant = with_quant
         self.hidden_shape = hidden_states.shape
 
@@ -439,11 +474,24 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
             num_global_tokens_per_local_expert,
             global_input_tokens_local_experts_indices,
         ) = self._dispatch_preprocess(hidden_states, topk_ids)
+        dump_tensor("ffn/token_dispatch_all2allv",
+                    "permutated_local_input_tokens",
+                    permutated_local_input_tokens)
+        dump_tensor("ffn/token_dispatch_all2allv",
+                    "reversed_local_input_permutation_mapping",
+                    reversed_local_input_permutation_mapping)
+        dump_tensor("ffn/token_dispatch_all2allv", "tokens_per_expert",
+                    tokens_per_expert)
 
         dynamic_scale_after_all2all = None
         if self.with_quant:
             permutated_local_input_tokens, dynamic_scale = torch_npu.npu_dynamic_quant(
                 permutated_local_input_tokens)
+            dump_tensor("ffn/token_dispatch_all2allv",
+                        "permutated_local_input_tokens_quantized",
+                        permutated_local_input_tokens)
+            dump_tensor("ffn/token_dispatch_all2allv", "dynamic_scale",
+                        dynamic_scale)
             _, dynamic_scale_after_all2all, permute2_ep_all_to_all_handle = async_all_to_all(
                 dynamic_scale, output_splits, input_splits, self.ep_group)
             permute2_ep_all_to_all_handle.wait()
@@ -453,12 +501,23 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
             permutated_local_input_tokens, output_splits, input_splits,
             self.ep_group)
         permute1_ep_all_to_all_handle.wait()
+        dump_tensor("ffn/token_dispatch_all2allv",
+                    "global_input_tokens_after_all2all",
+                    global_input_tokens)
         permutated_local_input_tokens.untyped_storage().resize_(0)
 
         # Postprocess
         global_input_tokens, dynamic_scale_final, reversed_global_input_permutation_mapping = self._dispatch_postprocess(
             global_input_tokens, dynamic_scale_after_all2all,
             global_input_tokens_local_experts_indices)
+        dump_tensor("ffn/token_dispatch_all2allv",
+                    "global_input_tokens_postprocessed",
+                    global_input_tokens)
+        dump_tensor("ffn/token_dispatch_all2allv", "dynamic_scale_final",
+                    dynamic_scale_final)
+        dump_tensor("ffn/token_dispatch_all2allv",
+                    "reversed_global_input_permutation_mapping",
+                    reversed_global_input_permutation_mapping)
 
         context_metadata = {
             "input_splits":
@@ -483,10 +542,16 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
 
     def token_combine(self, hidden_states, context_metadata, bias=None):
         assert bias is None, "Bias is not supported in MoEAlltoAllvTokenDispatcher."
+        dump_tensor("ffn/token_combine_all2allv", "input_hidden_states",
+                    hidden_states)
+        dump_mapping("ffn/token_combine_all2allv", "input_context",
+                     context_metadata)
 
         # 1. Preprocess using metadata
         hidden_states = self._combine_preprocess(hidden_states,
                                                  context_metadata)
+        dump_tensor("ffn/token_combine_all2allv",
+                    "hidden_states_after_preprocess", hidden_states)
 
         # 2. AllToAll
         _, permutated_local_input_tokens, handle = async_all_to_all(
@@ -496,16 +561,23 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
             self.ep_group,
         )
         handle.wait()
+        dump_tensor("ffn/token_combine_all2allv",
+                    "permutated_local_input_tokens_after_all2all",
+                    permutated_local_input_tokens)
         hidden_states.untyped_storage().resize_(0)
 
         # 3. Postprocess using metadata
         output = self._combine_postprocess(permutated_local_input_tokens,
                                            context_metadata)
+        dump_tensor("ffn/token_combine_all2allv", "output", output)
 
         return TokenCombineResult(routed_out=output)
 
     def _dispatch_preprocess(self, hidden_states, topk_ids):
         assert self.hidden_shape is not None
+        dump_tensor("ffn/moe_token_permute", "input_hidden_states",
+                    hidden_states)
+        dump_tensor("ffn/moe_token_permute", "input_topk_ids", topk_ids)
         hidden_states = hidden_states.view(-1, hidden_states.size(-1))
         (
             tokens_per_expert,
@@ -522,6 +594,12 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
             indices=topk_ids,
             num_out_tokens=self.num_out_tokens,
         )
+        dump_tensor("ffn/moe_token_permute",
+                    "output_permutated_local_input_tokens",
+                    permutated_local_input_tokens)
+        dump_tensor("ffn/moe_token_permute",
+                    "output_reversed_local_input_permutation_mapping",
+                    reversed_local_input_permutation_mapping)
 
         return (
             permutated_local_input_tokens,
@@ -534,6 +612,8 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
         )
 
     def _preprocess(self, topk_ids: torch.Tensor):
+        dump_tensor("ffn/token_dispatch_preprocess", "input_topk_ids",
+                    topk_ids)
         num_local_tokens_per_expert = torch.histc(topk_ids,
                                                   bins=self.num_experts,
                                                   min=0,
@@ -560,6 +640,15 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
             torch.device("cpu"), non_blocking=True).numpy())
         num_tokens_per_local_expert = num_global_tokens_per_local_expert.sum(
             axis=0)
+        dump_tensor("ffn/token_dispatch_preprocess",
+                    "num_local_tokens_per_expert",
+                    num_local_tokens_per_expert)
+        dump_tensor("ffn/token_dispatch_preprocess",
+                    "num_global_tokens_per_expert",
+                    num_global_tokens_per_expert)
+        dump_tensor("ffn/token_dispatch_preprocess",
+                    "num_tokens_per_local_expert",
+                    num_tokens_per_local_expert)
 
         global_input_tokens_local_experts_indices = None
         if self.num_local_experts > 1:
@@ -584,6 +673,14 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
     def _dispatch_postprocess(self, global_input_tokens,
                               dynamic_scale_after_all2all,
                               global_input_tokens_local_experts_indices):
+        dump_tensor("ffn/token_dispatch_postprocess",
+                    "input_global_input_tokens", global_input_tokens)
+        dump_tensor("ffn/token_dispatch_postprocess",
+                    "input_dynamic_scale_after_all2all",
+                    dynamic_scale_after_all2all)
+        dump_tensor("ffn/token_dispatch_postprocess",
+                    "input_global_input_tokens_local_experts_indices",
+                    global_input_tokens_local_experts_indices)
         # Early return if no local experts or no tokens
         if self.num_local_experts <= 1:
             return global_input_tokens, dynamic_scale_after_all2all, None
@@ -601,20 +698,32 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
         # Non-quantized case
         global_input_tokens, reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(
             global_input_tokens, global_input_tokens_local_experts_indices)
+        dump_tensor("ffn/token_dispatch_postprocess",
+                    "output_global_input_tokens", global_input_tokens)
+        dump_tensor("ffn/token_dispatch_postprocess",
+                    "output_reversed_global_input_permutation_mapping",
+                    reversed_global_input_permutation_mapping)
         return global_input_tokens, dynamic_scale_after_all2all, reversed_global_input_permutation_mapping
 
     def _combine_preprocess(self, hidden_states: torch.Tensor,
                             context_metadata: dict) -> torch.Tensor:
+        dump_tensor("ffn/token_combine_preprocess", "input_hidden_states",
+                    hidden_states)
         # Unpermutation 2: expert output to AlltoAll input
         if hidden_states.shape[0] > 0 and self.num_local_experts > 1:
             rev_global = context_metadata[
                 "reversed_global_input_permutation_mapping"]
             hidden_states = torch_npu.npu_moe_token_unpermute(
                 hidden_states, rev_global)
+            dump_tensor("ffn/token_combine_preprocess", "output",
+                        hidden_states)
         return hidden_states
 
     def _combine_postprocess(self, permutated_local_input_tokens: torch.Tensor,
                              context_metadata: dict) -> torch.Tensor:
+        dump_tensor("ffn/token_combine_postprocess",
+                    "input_permutated_local_input_tokens",
+                    permutated_local_input_tokens)
         # Unpermutation 1: AlltoAll output to output
         output = torch_npu.npu_moe_token_unpermute(
             permuted_tokens=permutated_local_input_tokens,
@@ -624,4 +733,5 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
             restore_shape=self.hidden_shape_before_permute,
         )
         output = output.view(self.hidden_shape)
+        dump_tensor("ffn/token_combine_postprocess", "output", output)
         return output

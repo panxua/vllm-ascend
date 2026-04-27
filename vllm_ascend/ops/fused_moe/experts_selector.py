@@ -23,6 +23,7 @@ from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.utils import split_tensor_along_first_dim
+from vllm_ascend.utils.tensor_dump import dump_tensor
 
 def select_experts(hidden_states: torch.Tensor,
                    router_logits: torch.Tensor,
@@ -64,6 +65,12 @@ def select_experts(hidden_states: torch.Tensor,
         topk_weights: router weights of shape (num_tokens, top_k).
         topk_ids: selected expert IDs of shape (num_tokens, top_k).
     """
+    dump_tensor("ffn/select_experts", "input_hidden_states", hidden_states)
+    dump_tensor("ffn/select_experts", "input_router_logits", router_logits)
+    dump_tensor("ffn/select_experts", "input_e_score_correction_bias",
+                e_score_correction_bias)
+    dump_tensor("ffn/select_experts", "input_ids", input_ids)
+    dump_tensor("ffn/select_experts", "input_tid2eid", tid2eid)
     # prefetch w1_w3_proj.weight preprocess
     weight_prefetch_method = get_weight_prefetch_method()
     if weight_prefetch_method:
@@ -131,6 +138,8 @@ def select_experts(hidden_states: torch.Tensor,
         topk_ids = torch.cat([topk_ids, pad_shared_expert_ids], dim=1)
         topk_weights = torch.cat([topk_weights, pad_shared_expert_weights],
                                  dim=1)
+    dump_tensor("ffn/select_experts", "output_topk_weights", topk_weights)
+    dump_tensor("ffn/select_experts", "output_topk_ids", topk_ids)
     return topk_weights, topk_ids
 
 
@@ -248,6 +257,14 @@ def _select_experts_with_fusion_ops(
         input_ids = None
     ):
 
+    dump_tensor("ffn/moe_gating_top_k_hash", "input_hidden_states",
+                hidden_states)
+    dump_tensor("ffn/moe_gating_top_k_hash", "input_router_logits",
+                router_logits)
+    dump_tensor("ffn/moe_gating_top_k_hash", "input_bias",
+                e_score_correction_bias)
+    dump_tensor("ffn/moe_gating_top_k_hash", "input_tid2eid", tid2eid)
+    dump_tensor("ffn/moe_gating_top_k_hash", "input_ids", input_ids)
     topk_group = topk_group if topk_group is not None else 1
     num_expert_group = num_expert_group if num_expert_group is not None else 1
     renorm = int(renormalize)
@@ -271,6 +288,10 @@ def _select_experts_with_fusion_ops(
                     input_ids, num_partitions=tp_size)
                 input_ids = splitted_input[tp_rank].contiguous()
             input_ids = torch.where(input_ids == -1, 0 ,input_ids)
+            dump_tensor("ffn/moe_gating_top_k_hash", "input_ids_prepared",
+                        input_ids)
+            dump_tensor("ffn/moe_gating_top_k_hash", "tid2eid_prepared",
+                        tid2eid_ones)
         else:
             input_ids = None
             tid2eid_ones = None
@@ -289,6 +310,10 @@ def _select_experts_with_fusion_ops(
             norm_type=2,       # 归一化类型（可选）
             out_flag=False          # 是否输出归一化结果（可选）
         )
+        dump_tensor("ffn/moe_gating_top_k_hash", "output_topk_weights",
+                    topk_weights)
+        dump_tensor("ffn/moe_gating_top_k_hash", "output_topk_ids",
+                    topk_ids)
         return topk_weights, topk_ids
 
         scores = F.softplus(router_logits).sqrt()
@@ -332,6 +357,9 @@ def _select_experts_with_fusion_ops(
         tid2eid=tid2eid)
     if scoring_func == "softmax" or scoring_func == "sqrtsoftplus":
         topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+    dump_tensor("ffn/moe_gating_top_k_hash", "output_topk_weights",
+                topk_weights)
+    dump_tensor("ffn/moe_gating_top_k_hash", "output_topk_ids", topk_ids)
 
     return topk_weights, topk_ids
 
@@ -374,6 +402,12 @@ def _native_select_experts(
     Raises:
         ValueError: If an unsupported scoring function is provided.
     """
+    dump_tensor("ffn/select_experts_native", "input_hidden_states",
+                hidden_states)
+    dump_tensor("ffn/select_experts_native", "input_router_logits",
+                router_logits)
+    dump_tensor("ffn/select_experts_native", "input_bias",
+                e_score_correction_bias)
 
     if scoring_func == "softmax":
         topk_weights = router_logits.softmax(dim=-1)
@@ -412,6 +446,9 @@ def _native_select_experts(
     # Required by npu_moe_init_routing
     topk_ids = topk_ids.to(torch.int32)
     topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+    dump_tensor("ffn/select_experts_native", "output_topk_weights",
+                topk_weights)
+    dump_tensor("ffn/select_experts_native", "output_topk_ids", topk_ids)
 
     return topk_weights, topk_ids
 
