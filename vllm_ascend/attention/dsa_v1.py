@@ -1275,18 +1275,22 @@ class AscendDSAImpl(DSAAttentionImpl):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
+        _dump_sub(o_proj_input, "input", "attention_output_rope")
         _dump_sub(o_proj_input, "output", "attention_output_rope")
 
         # o_a_proj
         o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, -1)
         if olora_tp_enable():
+            _dump_sub(o_proj_input, "input", "attention_o_a_proj")
             o_proj_input = self.wo_a(o_proj_input)
         else:
             o_proj_input = torch_npu.npu_transpose_batchmatmul(o_proj_input, self.wo_a.weight, bias=None, scale=None, perm_x1=(1,0,2), perm_x2=(0,1,2), perm_y=(1,0,2), batch_split_factor=1)
             o_proj_input = o_proj_input.reshape(num_tokens, -1)
+        _dump_sub(o_proj_input, "input", "attention_o_a_proj")
         _dump_sub(o_proj_input, "output", "attention_o_a_proj")
 
         # o_b_proj
+        _dump_sub(output, "input", "attention_o_b_proj")
         output[...] = self.wo_b(o_proj_input)
         _dump_sub(output, "output", "attention_o_b_proj")
 
@@ -1320,13 +1324,14 @@ class AscendDSAImpl(DSAAttentionImpl):
         # q_a_proj
         _dump_sub(hidden_states, "input_hidden_states", "attention_q_a_proj")
         qr = self.q_norm(self.wq_a(hidden_states))
+        _dump_sub(qr, "input_qr", "attention_q_b_proj")
         _dump_sub(qr, "output_qr", "attention_q_a_proj")
         # q_b_proj
         q = self.wq_b(qr).unflatten(-1, (self.n_local_heads, self.head_dim))
-        _dump_sub(q, "output_q", "attention_q_b_proj")
-        # q_rmsnorm
+        _dump_sub(q, "input_q", "attention_q_rmsnorm")
         q = triton_q_rms(q, self.eps)
         _dump_sub(q, "output_q", "attention_q_rmsnorm")
+        _dump_sub(q, "output_q", "attention_q_b_proj")
 
         # rope_q
         _dump_sub(q, "input_q", "attention_q_rope")
@@ -1340,7 +1345,9 @@ class AscendDSAImpl(DSAAttentionImpl):
         _dump_sub(q, "output_q", "attention_q_rope")
 
         # kv_proj
+        _dump_sub(hidden_states, "input_hidden_states", "attention_kv_proj")
         kv = self.wkv(hidden_states)
+        _dump_sub(kv, "input_kv", "attention_kv_layernorm")
         _dump_sub(kv, "output_kv", "attention_kv_proj")
         # kv_layernorm
         kv = self.kv_norm(kv)
@@ -1359,6 +1366,7 @@ class AscendDSAImpl(DSAAttentionImpl):
         _dump_sub(kv, "output_kv", "attention_kv_rope")
 
         _dump_sub(kv, "input_kv", "attention_scatter_ori_kv")
+        _dump_sub(kv, "output_kv", "attention_scatter_ori_kv")
 
         compress_cos = attn_metadata.prefill.compress_cos[layer_name]
         compress_sin = attn_metadata.prefill.compress_sin[layer_name]
@@ -1380,17 +1388,17 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             coff = 2 if self.compressor_overlap else 1
 
-            _dump_sub(hidden_states, "hidden_states", "compressor")
-            _dump_sub(self.compressor_wkv.weight, "wkv_weight", "compressor")
-            _dump_sub(self.compressor_wgate.weight, "wgate_weight", "compressor")
-            _dump_sub(self.compressor_ape, "ape_weight", "compressor")
-            _dump_sub(self.compressor_norm.weight, "norm_weight", "compressor")
-            _dump_sub(compress_sin, "compress_sin", "compressor")
-            _dump_sub(compress_cos, "compress_cos", "compressor")
-            _dump_sub(attn_metadata.prefill.state_block_table, "block_table", "compressor")
-            _dump_sub(actual_seq_lengths_query, "cu_seqlens", "compressor")
+            _dump_sub(hidden_states, "input_hidden_states", "compressor")
+            _dump_sub(self.compressor_wkv.weight, "input_wkv_weight", "compressor")
+            _dump_sub(self.compressor_wgate.weight, "input_wgate_weight", "compressor")
+            _dump_sub(self.compressor_ape, "input_ape_weight", "compressor")
+            _dump_sub(self.compressor_norm.weight, "input_norm_weight", "compressor")
+            _dump_sub(compress_sin, "input_compress_sin", "compressor")
+            _dump_sub(compress_cos, "input_compress_cos", "compressor")
+            _dump_sub(attn_metadata.prefill.state_block_table, "input_block_table", "compressor")
+            _dump_sub(actual_seq_lengths_query, "input_cu_seqlens", "compressor")
             if attn_metadata.prefill.start_pos is not None:
-                _dump_sub(attn_metadata.prefill.start_pos, "start_pos", "compressor")
+                _dump_sub(attn_metadata.prefill.start_pos, "input_start_pos", "compressor")
 
             # compressor
             compressed_kv,_,_,_,_ = torch.ops._C_ascend.compressor(
@@ -1423,6 +1431,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             # kv_compress_epilog
             if compressed_kv is not None:
+                _dump_sub(compressed_kv, "input", "scatter_cmp_kv")
                 torch_npu.npu_scatter_nd_update_(
                                 kv_cache[0].view(-1, compressed_kv.shape[-1]),
                                 compressed_kv_slot_mapping.unsqueeze(-1),
@@ -1498,6 +1507,16 @@ class AscendDSAImpl(DSAAttentionImpl):
                 layout_kv="TND" if self.enable_kv_tnd else "PA_ND"
             )[0]
 
+        _dump_sub(q, "input_q", "attention_sparse_attn")
+        _dump_sub(sliding_window_kv, "input_sliding_window_kv", "attention_sparse_attn")
+        if self.compress_ratio == 1:
+            _dump_sub(attn_metadata.prefill.sas_c1_metadata, "input_sas_c1_metadata", "attention_sparse_attn")
+        elif self.compress_ratio == 4:
+            _dump_sub(compressed_kv, "input_compressed_kv", "attention_sparse_attn")
+            _dump_sub(attn_metadata.prefill.sas_c4_metadata, "input_sas_c4_metadata", "attention_sparse_attn")
+        else:
+            _dump_sub(compressed_kv, "input_compressed_kv", "attention_sparse_attn")
+            _dump_sub(attn_metadata.prefill.sas_c128_metadata, "input_sas_c128_metadata", "attention_sparse_attn")
         _dump_sub(attn_output, "output", "attention_sparse_attn")
 
         # swa exec kv
@@ -1554,16 +1573,19 @@ class AscendDSAImpl(DSAAttentionImpl):
                     bias=self.wq_b.bias,
                     output_dtype=hidden_states.dtype,
                 ).unflatten(-1, (self.n_local_heads, self.head_dim))
+                _dump_sub(qr, "input_qr", "attention_q_b_proj")
                 _dump_sub(q, "output_q", "attention_q_b_proj")
         else:
             _dump_sub(hidden_states, "input_hidden_states", "attention_q_a_proj")
             qr = q = self.q_norm(self.wq_a(hidden_states))
+            _dump_sub(qr, "input_qr", "attention_q_b_proj")
             _dump_sub(qr, "output_qr", "attention_q_a_proj")
             q = self.wq_b(q).unflatten(-1, (self.n_local_heads, self.head_dim))
             _dump_sub(q, "output_q", "attention_q_b_proj")
             qr_pertoken_scale = None
             
         # q_rmsnorm
+        _dump_sub(q, "input_q", "attention_q_rmsnorm")
         q = triton_q_rms(q, self.eps)
         _dump_sub(q, "output_q", "attention_q_rmsnorm")
 
@@ -1583,7 +1605,9 @@ class AscendDSAImpl(DSAAttentionImpl):
                 torch.npu.current_stream().wait_event(wait_hidden_state_cal_event)
 
             # kv_proj
+            _dump_sub(hidden_states, "input_hidden_states", "attention_kv_proj")
             kv = self.wkv(hidden_states)
+            _dump_sub(kv, "input_kv", "attention_kv_layernorm")
             _dump_sub(kv, "output_kv", "attention_kv_proj")
             # kv_layernorm
             kv = self.kv_norm(kv)
@@ -1603,6 +1627,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             # scatter_ori_kv
             _dump_sub(kv, "input_kv", "attention_scatter_ori_kv")
+            _dump_sub(kv, "output_kv", "attention_scatter_ori_kv")
             torch_npu.npu_scatter_nd_update_(
                 kv_state[0].view(-1, kv.shape[-1]),
                 attn_metadata.decode.swa_slot_mapping.unsqueeze(-1),
@@ -1636,17 +1661,17 @@ class AscendDSAImpl(DSAAttentionImpl):
 
             coff = 2 if self.compressor_overlap else 1
 
-            _dump_sub(hidden_states, "hidden_states", "compressor")
-            _dump_sub(self.compressor_wkv.weight, "wkv_weight", "compressor")
-            _dump_sub(self.compressor_wgate.weight, "wgate_weight", "compressor")
-            _dump_sub(self.compressor_ape, "ape_weight", "compressor")
-            _dump_sub(self.compressor_norm.weight, "norm_weight", "compressor")
-            _dump_sub(compress_sin, "compress_sin", "compressor")
-            _dump_sub(compress_cos, "compress_cos", "compressor")
-            _dump_sub(attn_metadata.decode.state_block_table, "block_table", "compressor")
-            _dump_sub(actual_seq_lengths_query, "cu_seqlens", "compressor")
+            _dump_sub(hidden_states, "input_hidden_states", "compressor")
+            _dump_sub(self.compressor_wkv.weight, "input_wkv_weight", "compressor")
+            _dump_sub(self.compressor_wgate.weight, "input_wgate_weight", "compressor")
+            _dump_sub(self.compressor_ape, "input_ape_weight", "compressor")
+            _dump_sub(self.compressor_norm.weight, "input_norm_weight", "compressor")
+            _dump_sub(compress_sin, "input_compress_sin", "compressor")
+            _dump_sub(compress_cos, "input_compress_cos", "compressor")
+            _dump_sub(attn_metadata.decode.state_block_table, "input_block_table", "compressor")
+            _dump_sub(actual_seq_lengths_query, "input_cu_seqlens", "compressor")
             if attn_metadata.decode.start_pos is not None:
-                _dump_sub(attn_metadata.decode.start_pos, "start_pos", "compressor")
+                _dump_sub(attn_metadata.decode.start_pos, "input_start_pos", "compressor")
 
             # compressor
             compressed_kv,_,_,_,_ = torch.ops._C_ascend.compressor(
@@ -1737,6 +1762,16 @@ class AscendDSAImpl(DSAAttentionImpl):
                 layout_q="TND",
                 layout_kv="PA_ND"
             )[0]
+        _dump_sub(q, "input_q", "attention_sparse_attn")
+        _dump_sub(kv_state[0], "input_kv_state", "attention_sparse_attn")
+        if self.compress_ratio == 1:
+            _dump_sub(attn_metadata.decode.sas_c1_metadata, "input_sas_c1_metadata", "attention_sparse_attn")
+        elif self.compress_ratio == 4:
+            _dump_sub(compressed_kv, "input_compressed_kv", "attention_sparse_attn")
+            _dump_sub(attn_metadata.decode.sas_c4_metadata, "input_sas_c4_metadata", "attention_sparse_attn")
+        else:
+            _dump_sub(compressed_kv, "input_compressed_kv", "attention_sparse_attn")
+            _dump_sub(attn_metadata.decode.sas_c128_metadata, "input_sas_c128_metadata", "attention_sparse_attn")
         _dump_sub(attn_output, "output", "attention_sparse_attn")
         return attn_output
 
@@ -1897,5 +1932,6 @@ class AscendDSAImpl(DSAAttentionImpl):
             cmp_ratio = 4,
             return_value = False
         )
+        _dump_sub(indexer_metadata, "input_metadata", "attention/indexer/quant_lightning_indexer")
         _dump_sub(topk_idxs, "topk_idxs", "attention/indexer/quant_lightning_indexer")
         return topk_idxs

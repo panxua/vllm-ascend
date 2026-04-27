@@ -233,6 +233,8 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         _dump_sub(x, "input_hidden_states", "ffn_dynamic_quant")
         _dump_sub(router_logits, "input_router_logits", "ffn_dynamic_quant")
+        _dump_sub(x, "output", "ffn_dynamic_quant")
+        _dump_sub(router_logits, "output_router_logits", "ffn_dynamic_quant")
 
         if zero_expert_num > 0 and zero_expert_type is not None:
             topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
@@ -254,6 +256,8 @@ class AscendW8A8DynamicFusedMoEMethod:
         assert topk_weights is not None
         topk_weights = topk_weights.to(self.in_dtype)
 
+        _dump_sub(topk_weights, "input_topk_weights", "ffn_moe_active_topk")
+        _dump_sub(topk_ids, "input_topk_ids", "ffn_moe_active_topk")
         _dump_sub(topk_weights, "output_topk_weights", "ffn_moe_active_topk")
         _dump_sub(topk_ids, "output_topk_ids", "ffn_moe_active_topk")
 
@@ -296,7 +300,9 @@ class AscendW8A8DynamicFusedMoEMethod:
             mc2_mask=kwargs.get("mc2_mask", None))
 
         _dump_sub(final_hidden_states, "input", "ffn_moe_combine_result")
+        _dump_sub(final_hidden_states, "output", "ffn_moe_combine_result")
         if not self.dynamic_eplb:
+            _dump_sub(final_hidden_states, "input", "ffn_group_gemm1")
             _dump_sub(layer.w13_weight, "weight_w13", "ffn_group_gemm1")
             _dump_sub(layer.w2_weight, "weight_w2", "ffn_group_gemm1")
             _dump_sub(layer.w13_weight_scale, "weight_w13_scale", "ffn_group_gemm1")

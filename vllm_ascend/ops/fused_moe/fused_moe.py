@@ -134,6 +134,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             tid2eid=self.tid2eid,
             input_ids=input_ids
             )
+        _dump_sub(topk_weights, "output_topk_weights", "ffn_select_experts")
+        _dump_sub(topk_ids, "output_topk_ids", "ffn_select_experts")
+        _dump_sub(topk_weights, "input_topk_weights", "ffn_moe_active_topk")
+        _dump_sub(topk_ids, "input_topk_ids", "ffn_moe_active_topk")
         _dump_sub(topk_weights, "output_topk_weights", "ffn_moe_active_topk")
         _dump_sub(topk_ids, "output_topk_ids", "ffn_moe_active_topk")
 
@@ -147,6 +151,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             )
 
         topk_weights = topk_weights.to(x.dtype)
+        _dump_sub(x, "input_hidden_states", "ffn_forward_expert")
         _dump_sub(topk_weights, "input_topk_weights", "ffn_forward_expert")
         _dump_sub(topk_ids, "input_topk_ids", "ffn_forward_expert")
 
@@ -158,7 +163,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 random_matrix, dim=1)[:, :topk_ids.size(1)].to(topk_ids.dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
-        _dump_sub(x, "input_hidden_states", "ffn_forward_expert")
+        _dump_sub(x, "input_hidden_states", "ffn_gate_proj")
         _dump_sub(layer.w13_weight, "weight_w13", "ffn_gate_proj")
         _dump_sub(layer.w2_weight, "weight_w2", "ffn_gate_proj")
         final_hidden_states = moe_comm_method.fused_experts(
@@ -171,6 +176,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             apply_router_weight_on_input=apply_router_weight_on_input,
             dynamic_eplb=self.dynamic_eplb,
             mc2_mask=kwargs.get("mc2_mask", None))
+        _dump_sub(final_hidden_states, "output", "ffn_forward_expert")
+        _dump_sub(final_hidden_states, "input", "ffn_moe_combine_result")
         _dump_sub(final_hidden_states, "output", "ffn_moe_combine_result")
         if zero_expert_num > 0 and zero_expert_type is not None:
             final_hidden_states += zero_expert_result
@@ -376,6 +383,8 @@ class AscendFusedMoE(FusedMoE):
             replace_allreduce=forward_context.sp_enabled,
             enable_shared_expert_dp=self.enable_shared_expert_dp,
             quant_type=self.quant_type)
+        _dump_sub(hidden_states, "input_hidden_states", "ffn_dp_gather")
+        _dump_sub(router_logits, "input_router_logits", "ffn_dp_gather")
         _dump_sub(hidden_states, "output", "ffn_dp_gather")
         _dump_sub(router_logits, "output_router_logits", "ffn_dp_gather")
 
@@ -421,6 +430,8 @@ class AscendFusedMoE(FusedMoE):
                 torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
             self.moe_load.add_(local_load)
 
+        _dump_sub(fused_experts_results.routed_out, "input_routed_out", "ffn_tp_reduce")
+        _dump_sub(self.reduce_results, "input_reduce_results", "ffn_tp_reduce")
         routed_out = forward_context.moe_comm_method.finalize(
             hidden_states=fused_experts_results.routed_out,
             reduce_results=self.reduce_results,
@@ -588,11 +599,14 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             # dispatch communication.
             maybe_wait_event(fused_moe_evts.before_dispatch)
             part1_out = self._shared_experts_part1(hidden_states)
+            _dump_sub(hidden_states, "input_hidden_states", "ffn_shared_experts")
             _dump_sub(part1_out, "output_gate_up", "ffn_shared_experts")
             # Execute the down projection concurrently with the combine
             # communication.
             maybe_wait_event(fused_moe_evts.before_combine)
             shared_out = self._shared_experts_part2(hidden_states, part1_out)
+            _dump_sub(hidden_states, "input_hidden_states", "ffn_shared_expert_gate")
+            _dump_sub(part1_out, "input_part1", "ffn_shared_expert_gate")
             _dump_sub(shared_out, "output", "ffn_shared_expert_gate")
 
         # Make sure the default stream waits for the shared experts stream to

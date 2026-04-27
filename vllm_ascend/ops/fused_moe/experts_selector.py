@@ -247,6 +247,8 @@ def _select_expert_use_group_topk(
                                             dim=-1,
                                             sorted=False)
     topk_ids = topk_ids.to(torch.int32)
+    _dump_sub(topk_weights, "input_topk_weights", "gate_renormalize_topk_weights")
+    _dump_sub(topk_ids, "input_topk_ids", "gate_renormalize_topk_weights")
     topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
     _dump_sub(topk_weights, "output_weights", "gate_renormalize_topk_weights")
     _dump_sub(topk_ids, "output_topk_ids", "gate_renormalize_topk_weights")
@@ -474,6 +476,7 @@ def _native_select_experts(
     # Required by npu_moe_init_routing
     topk_ids = topk_ids.to(torch.int32)
     topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+    _dump_sub(topk_ids, "output_topk_ids", "gate_select_experts_native")
 
     return topk_weights, topk_ids
 
