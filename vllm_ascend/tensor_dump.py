@@ -104,6 +104,15 @@ def is_dummy_run() -> bool:
         return False
 
 
+def is_process_request() -> bool:
+    try:
+        from vllm.forward_context import get_forward_context
+        forward_context = get_forward_context()
+        return bool(getattr(forward_context, "is_process_request", False))
+    except Exception:
+        return False
+
+
 def is_dump_target_layer(layer_idx: int) -> bool:
     return layer_idx in dump_target_layers()
 
@@ -247,7 +256,7 @@ def log_tensor_info(module: str,
                     layer_idx: int | None = None) -> None:
     if not dump_enabled():
         return
-    if is_dummy_run():
+    if is_dummy_run() or not is_process_request():
         return
 
     step = _DUMP_STEP_CONTEXT.get()
@@ -284,7 +293,7 @@ def log_mapping_info(module: str,
         for idx, item in enumerate(value):
             log_mapping_info(module, f"{prefix}_{idx}", item,
                              layer_idx=layer_idx)
-    else:
+    elif is_process_request():
         _emit_dump_log(logging.INFO,
                        "[TENSOR_DUMP] tensor layer=%s %s/%s type=%s",
                        layer_idx, module, prefix, type(value).__name__)
@@ -297,7 +306,7 @@ def dump_tensor(module: str,
                 layer_idx: int | None = None) -> None:
     if not dump_enabled():
         return
-    if is_dummy_run():
+    if is_dummy_run() or not is_process_request():
         return
 
     step = _DUMP_STEP_CONTEXT.get()

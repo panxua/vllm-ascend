@@ -41,7 +41,8 @@ def set_ascend_forward_context(
         is_draft_model=False,
         is_multimodal_model=False,
         input_ids=None,
-        is_dummy_run: bool = False):
+        is_dummy_run: bool = False,
+        is_process_request: bool = False):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
@@ -70,6 +71,7 @@ def set_ascend_forward_context(
 
         forward_context.in_profile_run = in_profile_run
         forward_context.is_dummy_run = is_dummy_run
+        forward_context.is_process_request = is_process_request
 
         # NOTE: This cannot be set using set_forward_context
         # due to multiple warmups before actual capturing

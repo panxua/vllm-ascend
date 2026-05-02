@@ -88,6 +88,7 @@ from vllm_ascend.tensor_dump import (
     dump_target_layer as _dump_target_layer,
     dump_tensor as _dump_tensor,
     is_dummy_run as _is_dummy_run,
+    is_process_request as _is_process_request,
     reset_dump_layer as _reset_dump_layer,
     reset_dump_step as _reset_dump_step,
     reset_module_sequence as _reset_module_sequence,
@@ -979,7 +980,7 @@ class DeepseekV4Model(nn.Module):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        if _is_dummy_run():
+        if _is_dummy_run() or not _is_process_request():
             dump_step = self._dump_forward_step
         else:
             self._dump_forward_step += 1
