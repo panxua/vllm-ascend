@@ -92,7 +92,7 @@ def dump_target_steps() -> tuple[int, ...]:
 
 
 def is_dump_target_step(step: int) -> bool:
-    return step in dump_target_steps()
+    return step >= 0 and step in dump_target_steps()
 
 
 def is_dummy_run() -> bool:

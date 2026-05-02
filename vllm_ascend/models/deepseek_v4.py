@@ -954,7 +954,7 @@ class DeepseekV4Model(nn.Module):
         self.hc_head_fn = nn.Parameter(torch.empty(hc_mult, hc_dim,dtype = torch.float32))
         self.hc_head_base = nn.Parameter(torch.empty(hc_mult,dtype = torch.float32))
         self.hc_head_scale = nn.Parameter(torch.empty(1,dtype = torch.float32))
-        self._dump_forward_step = 0
+        self._dump_forward_step = -1
         
         
 
@@ -980,10 +980,10 @@ class DeepseekV4Model(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         if _is_dummy_run():
-            dump_step = -1
-        else:
             dump_step = self._dump_forward_step
+        else:
             self._dump_forward_step += 1
+            dump_step = self._dump_forward_step
             _reset_module_sequence(dump_step)
         dump_step_token = _set_dump_step(dump_step)
         try:
