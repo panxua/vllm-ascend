@@ -2414,7 +2414,8 @@ class NPUModelRunner(GPUModelRunner):
                     batch_descriptor=batch_descriptor,
                     model_instance=self.model,
                     is_multimodal_model=self.is_multimodal_model,
-                    input_ids=input_ids):
+                    input_ids=input_ids,
+                    is_dummy_run=True):
                 hidden_states = self._generate_dummy_run_hidden_states(
                     input_ids, positions, num_tokens_padded,
                     intermediate_tensors, inputs_embeds)

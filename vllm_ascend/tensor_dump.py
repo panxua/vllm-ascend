@@ -95,14 +95,11 @@ def is_dump_target_step(step: int) -> bool:
     return step in dump_target_steps()
 
 
-def dump_dir() -> str | None:
-    return os.environ.get("DUMP_DIR")
-
-
-def is_dump_warmup() -> bool:
+def is_dummy_run() -> bool:
     try:
         from vllm.forward_context import get_forward_context
-        return bool(getattr(get_forward_context(), "in_profile_run", False))
+        forward_context = get_forward_context()
+        return bool(getattr(forward_context, "is_dummy_run", False))
     except Exception:
         return False
 
@@ -169,6 +166,18 @@ def module_with_sequence(module: str, *, layer_idx: int | None = None) -> str:
         state["last_raw_module"] = module
         state["last_prefixed_module"] = prefixed_module
         return prefixed_module
+
+
+def reset_module_sequence(step: int | None = None) -> None:
+    rank = dump_rank()
+    with _MODULE_SEQUENCE_LOCK:
+        if step is None:
+            keys = [key for key in _MODULE_SEQUENCE_STATE if key[1] == rank]
+        else:
+            keys = [key for key in _MODULE_SEQUENCE_STATE
+                    if key[0] == step and key[1] == rank]
+        for key in keys:
+            _MODULE_SEQUENCE_STATE.pop(key, None)
 
 
 def save_tensor_as_pickle(tensor: torch.Tensor, path: str) -> None:
@@ -238,6 +247,8 @@ def log_tensor_info(module: str,
                     layer_idx: int | None = None) -> None:
     if not dump_enabled():
         return
+    if is_dummy_run():
+        return
 
     step = _DUMP_STEP_CONTEXT.get()
     if step is None:
@@ -286,6 +297,8 @@ def dump_tensor(module: str,
                 layer_idx: int | None = None) -> None:
     if not dump_enabled():
         return
+    if is_dummy_run():
+        return
 
     step = _DUMP_STEP_CONTEXT.get()
     if step is None:
@@ -313,8 +326,8 @@ def dump_tensor(module: str,
             tensor_info(tensor))
         return
 
-    root_dir = dump_dir()
-    if not root_dir:
+    dump_dir = os.environ.get("DUMP_DIR")
+    if not dump_dir:
         _emit_dump_log(logging.WARNING,
                        "[TENSOR_DUMP] skip %s/%s: DUMP_DIR is not set",
                        module, name)
@@ -335,7 +348,7 @@ def dump_tensor(module: str,
     prefixed_module = module_with_sequence(module, layer_idx=layer_idx)
     safe_module = sanitize_dump_component(prefixed_module)
     safe_name = sanitize_dump_component(name)
-    path = os.path.join(root_dir, f"step{step}", f"rank{rank}",
+    path = os.path.join(dump_dir, f"step{step}", f"rank{rank}",
                         f"layer{layer_idx}", safe_module, f"{safe_name}.pt")
     try:
         saved = tensor.detach().cpu().contiguous()
