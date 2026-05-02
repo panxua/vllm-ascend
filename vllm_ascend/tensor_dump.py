@@ -21,6 +21,7 @@ _DUMP_STEP_CONTEXT: contextvars.ContextVar[int | None] = contextvars.ContextVar(
 _DUMP_LAYER_CONTEXT: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "xllm_dump_layer", default=None)
 _DUMP_INVALID_LAYER_LOGGED = False
+_DUMP_INVALID_STEP_LOGGED = False
 _MODULE_SEQUENCE_LOCK = threading.Lock()
 _MODULE_SEQUENCE_STATE: dict[tuple[int, int, int], dict[str, object]] = {}
 
@@ -62,6 +63,51 @@ def dump_target_layers() -> tuple[int, ...]:
 
 def dump_target_layer() -> int:
     return dump_target_layers()[0]
+
+
+def dump_target_steps_raw() -> str:
+    return os.environ.get("XLLM_DUMP_STEP", "0") or "0"
+
+
+def dump_target_steps() -> tuple[int, ...]:
+    global _DUMP_INVALID_STEP_LOGGED
+    value = dump_target_steps_raw()
+    steps: list[int] = []
+    for token in value.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            step = int(token)
+            if step < 0:
+                raise ValueError
+            steps.append(step)
+        except ValueError:
+            if not _DUMP_INVALID_STEP_LOGGED:
+                logger.warning(
+                    "Invalid XLLM_DUMP_STEP=%r; fallback to step 0.", value)
+                _DUMP_INVALID_STEP_LOGGED = True
+            return (0,)
+    return tuple(steps) if steps else (0,)
+
+
+def is_dump_target_step(step: int) -> bool:
+    return step in dump_target_steps()
+
+
+def dump_dir() -> str | None:
+    return os.environ.get("DUMP_DIR")
+
+
+def is_dump_warmup() -> bool:
+    try:
+        from vllm.forward_context import get_forward_context
+        forward_context = get_forward_context()
+        if bool(getattr(forward_context, "in_profile_run", False)):
+            return True
+        return getattr(forward_context, "num_actual_tokens", None) == 0
+    except Exception:
+        return False
 
 
 def is_dump_target_layer(layer_idx: int) -> bool:
@@ -199,9 +245,9 @@ def log_tensor_info(module: str,
     step = _DUMP_STEP_CONTEXT.get()
     if step is None:
         step = 0
-    if step != 0:
-        logger.debug("Skip tensor info for %s/%s: step=%s is not 0.",
-                     module, name, step)
+    if not is_dump_target_step(step):
+        logger.debug("Skip tensor info for %s/%s: step=%s target_steps=[%s].",
+                     module, name, step, dump_target_steps_raw())
         return
 
     if layer_idx is None:
@@ -247,10 +293,11 @@ def dump_tensor(module: str,
     step = _DUMP_STEP_CONTEXT.get()
     if step is None:
         step = 0
-    if step != 0:
-        _emit_dump_log(logging.INFO,
-                       "[TENSOR_DUMP] skip %s/%s: step=%s is not 0",
-                       module, name, step)
+    if not is_dump_target_step(step):
+        _emit_dump_log(
+            logging.INFO,
+            "[TENSOR_DUMP] skip %s/%s: step=%s target_steps=[%s]",
+            module, name, step, dump_target_steps_raw())
         return
 
     if layer_idx is None:
@@ -269,8 +316,8 @@ def dump_tensor(module: str,
             tensor_info(tensor))
         return
 
-    dump_dir = os.environ.get("DUMP_DIR")
-    if not dump_dir:
+    root_dir = dump_dir()
+    if not root_dir:
         _emit_dump_log(logging.WARNING,
                        "[TENSOR_DUMP] skip %s/%s: DUMP_DIR is not set",
                        module, name)
@@ -291,7 +338,7 @@ def dump_tensor(module: str,
     prefixed_module = module_with_sequence(module, layer_idx=layer_idx)
     safe_module = sanitize_dump_component(prefixed_module)
     safe_name = sanitize_dump_component(name)
-    path = os.path.join(dump_dir, f"step{step}", f"rank{rank}",
+    path = os.path.join(root_dir, f"step{step}", f"rank{rank}",
                         f"layer{layer_idx}", safe_module, f"{safe_name}.pt")
     try:
         saved = tensor.detach().cpu().contiguous()

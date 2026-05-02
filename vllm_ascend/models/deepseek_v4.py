@@ -87,6 +87,7 @@ from vllm_ascend.tensor_dump import (
     dump_module_io as _dump_module_io,
     dump_target_layer as _dump_target_layer,
     dump_tensor as _dump_tensor,
+    is_dump_warmup as _is_dump_warmup,
     reset_dump_layer as _reset_dump_layer,
     reset_dump_step as _reset_dump_step,
     set_dump_layer as _set_dump_layer,
@@ -977,8 +978,11 @@ class DeepseekV4Model(nn.Module):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        dump_step = self._dump_forward_step
-        self._dump_forward_step += 1
+        if _is_dump_warmup():
+            dump_step = -1
+        else:
+            dump_step = self._dump_forward_step
+            self._dump_forward_step += 1
         dump_step_token = _set_dump_step(dump_step)
         try:
             return self._forward_impl(
