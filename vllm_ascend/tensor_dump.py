@@ -102,10 +102,7 @@ def dump_dir() -> str | None:
 def is_dump_warmup() -> bool:
     try:
         from vllm.forward_context import get_forward_context
-        forward_context = get_forward_context()
-        if bool(getattr(forward_context, "in_profile_run", False)):
-            return True
-        return getattr(forward_context, "num_actual_tokens", None) == 0
+        return bool(getattr(get_forward_context(), "in_profile_run", False))
     except Exception:
         return False
 
