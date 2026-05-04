@@ -295,8 +295,8 @@ def log_mapping_info(module: str,
                              layer_idx=layer_idx)
     elif is_process_request():
         _emit_dump_log(logging.INFO,
-                       "[TENSOR_DUMP] tensor layer=%s %s/%s type=%s",
-                       layer_idx, module, prefix, type(value).__name__)
+                       "[TENSOR_DUMP] tensor layer=%s %s/%s value=%r type=%s",
+                       layer_idx, module, prefix, value, type(value).__name__)
 
 
 def dump_tensor(module: str,
@@ -385,10 +385,10 @@ def dump_mapping(module: str,
         for idx, item in enumerate(value):
             dump_mapping(module, f"{prefix}_{idx}", item, layer_idx=layer_idx)
     else:
-        if dump_enabled():
+        if dump_enabled() and is_process_request():
             _emit_dump_log(logging.INFO,
-                           "[TENSOR_DUMP] skip %s/%s: object type is %s",
-                           module, prefix, type(value).__name__)
+                           "[TENSOR_DUMP] non_tensor %s/%s value=%r type=%s",
+                           module, prefix, value, type(value).__name__)
 
 
 def first_tensor(value) -> torch.Tensor | None:

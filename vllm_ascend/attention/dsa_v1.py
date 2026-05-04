@@ -973,15 +973,30 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         tp_size = get_tensor_model_parallel_world_size()
         n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
         index_topk = 512
+
+        def _dump_sas_metadata_io(name, inputs, output):
+            log_mapping_info("attention/sparse_attn_sharedkv_metadata",
+                             f"{name}_input", inputs,
+                             layer_idx=current_dump_layer())
+            dump_mapping("attention/sparse_attn_sharedkv_metadata",
+                         f"{name}_input", inputs,
+                         layer_idx=current_dump_layer())
+            log_tensor_info("attention/sparse_attn_sharedkv_metadata",
+                            f"{name}_output", output,
+                            layer_idx=current_dump_layer())
+            dump_tensor("attention/sparse_attn_sharedkv_metadata",
+                        f"{name}_output", output,
+                        layer_idx=current_dump_layer())
+
         if self.compressor_ratio == 1:
-            self.decode_sas_c1_metadata[:1024] = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
+            sas_metadata_inputs = dict(
                 num_heads_q=n_local_heads,
                 num_heads_kv=1,
                 head_dim=self.model_config.get_head_size(),
                 cu_seqlens_q=query_start_loc,
-                cu_seqlens_ori_kv = self.cu_seqlens_ori_kv,
-                cu_seqlens_cmp_kv = self.cu_seqlens_cmp_kv,
-                seqused_q = self.seqused_q,
+                cu_seqlens_ori_kv=self.cu_seqlens_ori_kv,
+                cu_seqlens_cmp_kv=self.cu_seqlens_cmp_kv,
+                seqused_q=self.seqused_q,
                 seqused_kv=self.seq_lens[:self.num_decodes],
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
@@ -995,23 +1010,25 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 layout_kv="PA_ND",
                 has_ori_kv=True,
                 has_cmp_kv=False,
-                device=str(self.seqused_q.device)
-            )
+                device=str(self.seqused_q.device))
+            sas_metadata = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
+                **sas_metadata_inputs)
+            self.decode_sas_c1_metadata[:1024] = sas_metadata
+            _dump_sas_metadata_io("c1", sas_metadata_inputs, sas_metadata)
         elif self.compressor_ratio == 4:
-            self.decode_sas_c4_metadata[:1024] = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
+            sas_metadata_inputs = dict(
                 num_heads_q=n_local_heads,
                 num_heads_kv=1,
                 head_dim=self.model_config.get_head_size(),
                 cu_seqlens_q=query_start_loc,
-                cu_seqlens_ori_kv = self.cu_seqlens_ori_kv,
-                cu_seqlens_cmp_kv = self.cu_seqlens_cmp_kv,
-                seqused_q = self.seqused_q,
+                cu_seqlens_ori_kv=self.cu_seqlens_ori_kv,
+                cu_seqlens_cmp_kv=self.cu_seqlens_cmp_kv,
+                seqused_q=self.seqused_q,
                 seqused_kv=self.seq_lens[:self.num_decodes],
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
                 batch_size=len(self.seq_lens[:self.num_decodes]),
                 cmp_topk=index_topk,
-                # topk=index_topk,
                 cmp_ratio=4,
                 ori_mask_mode=4,
                 cmp_mask_mode=3,
@@ -1021,17 +1038,20 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 layout_kv="PA_ND",
                 has_ori_kv=True,
                 has_cmp_kv=True,
-                device=str(self.seqused_q.device)
-            )
+                device=str(self.seqused_q.device))
+            sas_metadata = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
+                **sas_metadata_inputs)
+            self.decode_sas_c4_metadata[:1024] = sas_metadata
+            _dump_sas_metadata_io("c4", sas_metadata_inputs, sas_metadata)
         else:
-            self.decode_sas_c128_metadata[:1024] = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
+            sas_metadata_inputs = dict(
                 num_heads_q=n_local_heads,
                 num_heads_kv=1,
                 head_dim=self.model_config.get_head_size(),
                 cu_seqlens_q=query_start_loc,
-                cu_seqlens_ori_kv = self.cu_seqlens_ori_kv,
-                cu_seqlens_cmp_kv = self.cu_seqlens_cmp_kv,
-                seqused_q = self.seqused_q,
+                cu_seqlens_ori_kv=self.cu_seqlens_ori_kv,
+                cu_seqlens_cmp_kv=self.cu_seqlens_cmp_kv,
+                seqused_q=self.seqused_q,
                 seqused_kv=self.seq_lens[:self.num_decodes],
                 max_seqlen_q=max_seqlen_q,
                 max_seqlen_kv=max_seqlen_kv,
@@ -1045,8 +1065,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 layout_kv="PA_ND",
                 has_ori_kv=True,
                 has_cmp_kv=True,
-                device=str(self.seqused_q.device)
-            )
+                device=str(self.seqused_q.device))
+            sas_metadata = torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata(
+                **sas_metadata_inputs)
+            self.decode_sas_c128_metadata[:1024] = sas_metadata
+            _dump_sas_metadata_io("c128", sas_metadata_inputs, sas_metadata)
           
         self.decode_qli_metadata[:1024] = torch.ops._C_ascend.npu_quant_lightning_indexer_metadata(
             actual_seq_lengths_query=query_start_loc[1:].clone(),
@@ -1243,6 +1266,13 @@ class AscendDSAImpl(DSAAttentionImpl):
     def _log_map(self, module: str, name: str, value,
                  layer_name: str | None = None) -> None:
         log_mapping_info(module, name, value, layer_idx=parse_layer_idx(layer_name))
+
+    def _dump_operator_io(self, module: str, name: str, inputs, output,
+                          layer_name: str | None = None) -> None:
+        self._log_map(module, f"{name}_input", inputs, layer_name)
+        self._dump_map(module, f"{name}_input", inputs, layer_name)
+        self._log_map(module, f"{name}_output", output, layer_name)
+        self._dump_map(module, f"{name}_output", output, layer_name)
 
 
     # TODO: cast to bfloat16 to speed up
@@ -1571,8 +1601,8 @@ class AscendDSAImpl(DSAAttentionImpl):
                    self.attn_sink, layer_name)
 
         if self.compress_ratio == 1:
-            attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
-                q,
+            sparse_attn_inputs = dict(
+                q=q,
                 ori_kv=sliding_window_kv,
                 ori_block_table=attn_metadata.prefill.prefill_swa_block_table,
                 cu_seqlens_q=actual_seq_lengths_query,
@@ -1586,8 +1616,12 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="TND" if self.enable_kv_tnd else "PA_ND"
-            )[0]   
+                layout_kv="TND" if self.enable_kv_tnd else "PA_ND")
+            attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
+                **sparse_attn_inputs)[0]
+            self._dump_operator_io("attention/sparse_attn_sharedkv",
+                                   "prefill_c1", sparse_attn_inputs,
+                                   attn_output, layer_name)
         elif self.compress_ratio == 4:
             self._dump("attention/sparse_attn_sharedkv",
                        "input_cmp_kv_prefill",
@@ -1596,8 +1630,8 @@ class AscendDSAImpl(DSAAttentionImpl):
             self._dump("attention/sparse_attn_sharedkv",
                        "input_cmp_sparse_indices_prefill",
                        compress_topk_idxs, layer_name)
-            attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
-                q,
+            sparse_attn_inputs = dict(
+                q=q,
                 ori_kv=sliding_window_kv,
                 cmp_kv=compressed_kv.unsqueeze(1) if self.enable_kv_tnd else kv_cache[0],
                 cmp_sparse_indices=compress_topk_idxs,
@@ -1616,15 +1650,19 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="TND" if self.enable_kv_tnd else "PA_ND"
-            )[0]
+                layout_kv="TND" if self.enable_kv_tnd else "PA_ND")
+            attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
+                **sparse_attn_inputs)[0]
+            self._dump_operator_io("attention/sparse_attn_sharedkv",
+                                   "prefill_c4", sparse_attn_inputs,
+                                   attn_output, layer_name)
         else:
             self._dump("attention/sparse_attn_sharedkv",
                        "input_cmp_kv_prefill",
                        compressed_kv.unsqueeze(1) if self.enable_kv_tnd else kv_cache[0],
                        layer_name)
-            attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
-                q,
+            sparse_attn_inputs = dict(
+                q=q,
                 ori_kv=sliding_window_kv,
                 cmp_kv=compressed_kv.unsqueeze(1) if self.enable_kv_tnd else kv_cache[0],
                 ori_block_table=attn_metadata.prefill.prefill_swa_block_table,
@@ -1642,8 +1680,12 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="TND" if self.enable_kv_tnd else "PA_ND"
-            )[0]
+                layout_kv="TND" if self.enable_kv_tnd else "PA_ND")
+            attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
+                **sparse_attn_inputs)[0]
+            self._dump_operator_io("attention/sparse_attn_sharedkv",
+                                   "prefill_c128", sparse_attn_inputs,
+                                   attn_output, layer_name)
         self._dump("attention/sparse_attn_sharedkv", "output_prefill",
                    attn_output, layer_name)
 
@@ -1871,8 +1913,8 @@ class AscendDSAImpl(DSAAttentionImpl):
         self._dump("attention/sparse_attn_sharedkv", "input_sinks_decode",
                    self.attn_sink, layer_name)
         if self.compress_ratio == 1:
-            attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
-                q,
+            sparse_attn_inputs = dict(
+                q=q,
                 ori_kv=kv_state[0].unsqueeze(2),
                 ori_block_table=attn_metadata.decode.state_block_table,
                 cu_seqlens_q=actual_seq_lengths_query,
@@ -1885,16 +1927,20 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND"
-            )[0]
+                layout_kv="PA_ND")
+            attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
+                **sparse_attn_inputs)[0]
+            self._dump_operator_io("attention/sparse_attn_sharedkv",
+                                   "decode_c1", sparse_attn_inputs,
+                                   attn_output, layer_name)
         elif self.compress_ratio == 4:
             self._dump("attention/sparse_attn_sharedkv",
                        "input_cmp_kv_decode", kv_cache[0], layer_name)
             self._dump("attention/sparse_attn_sharedkv",
                        "input_cmp_sparse_indices_decode", compress_topk_idxs,
                        layer_name)
-            attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
-                q,
+            sparse_attn_inputs = dict(
+                q=q,
                 ori_kv=kv_state[0].unsqueeze(2),
                 cmp_kv=kv_cache[0],
                 cmp_sparse_indices=compress_topk_idxs,
@@ -1911,13 +1957,17 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND"
-            )[0]
+                layout_kv="PA_ND")
+            attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
+                **sparse_attn_inputs)[0]
+            self._dump_operator_io("attention/sparse_attn_sharedkv",
+                                   "decode_c4", sparse_attn_inputs,
+                                   attn_output, layer_name)
         else:
             self._dump("attention/sparse_attn_sharedkv",
                        "input_cmp_kv_decode", kv_cache[0], layer_name)
-            attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
-                q,
+            sparse_attn_inputs = dict(
+                q=q,
                 ori_kv=kv_state[0].unsqueeze(2),
                 cmp_kv=kv_cache[0],
                 ori_block_table=attn_metadata.decode.state_block_table,
@@ -1933,8 +1983,12 @@ class AscendDSAImpl(DSAAttentionImpl):
                 ori_win_left=self.window_size - 1,
                 ori_win_right=0,
                 layout_q="TND",
-                layout_kv="PA_ND"
-            )[0]
+                layout_kv="PA_ND")
+            attn_output = torch.ops._C_ascend.npu_sparse_attn_sharedkv(
+                **sparse_attn_inputs)[0]
+            self._dump_operator_io("attention/sparse_attn_sharedkv",
+                                   "decode_c128", sparse_attn_inputs,
+                                   attn_output, layer_name)
         self._dump("attention/sparse_attn_sharedkv", "output_decode",
                    attn_output, layer_name)
         return attn_output 
